@@ -63,15 +63,7 @@ npm run data -- path/to/SaveFolder.tar.gz   # or the raw save file; read-only
 npm run check                               # recompute the Optimized / Owned / Island / Greenhouse plans
 ```
 
-## Deploy (GitHub Pages)
-
-`.github/workflows/deploy.yml` tests, builds and publishes `dist/` on every push to `main`. `public/CNAME` sets the custom domain.
-
-1. In the repository on GitHub, go to **Settings → Pages → Source** and choose **GitHub Actions**.
-2. At your DNS provider, add a `CNAME` record pointing `stardew` to `<your-github-user>.github.io`.
-3. Back in **Settings → Pages**, check that the custom domain is `stardew.chandanshakya.com.np`, then turn on **Enforce HTTPS**.
-
-## Deploy (Cloudflare Pages, alternative)
+## Deploy (Cloudflare Pages)
 
 | Setting | Value |
 | --- | --- |
