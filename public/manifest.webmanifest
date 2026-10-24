@@ -1,0 +1,14 @@
+{
+  "name": "Stardew Farm Planner",
+  "short_name": "Farm Planner",
+  "description": "Stardew Valley 1.6 farm planner: save import, optimizer, 2D + 3D, build list.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1210",
+  "theme_color": "#0d1210",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

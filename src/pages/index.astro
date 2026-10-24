@@ -1,0 +1,283 @@
+---
+// Single-page app shell. All logic lives in src/app/main.ts (bundled + inlined at build).
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Stardew Valley 1.6 farm planner: every farm type, save-file import, optimizer, 2D + 3D views, build list." />
+  <title>Stardew Farm Planner</title>
+  <meta name="theme-color" content="#0d1210" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%2314201a'/><path d='M8 3c2 2 2 5 0 10C6 8 6 5 8 3z' fill='%234ade80'/></svg>" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo">◆</span><b>Farm Planner</b><span class="sub" id="saveInfo">—</span></div>
+    <nav class="tabs" id="tabs" role="tablist"></nav>
+    <div class="actions">
+      <select id="farmType" title="Farm type" aria-label="Farm type"></select>
+      <button class="btn" id="loadSave" title="Load a save file (raw save, .tar.gz or .gz)">⇪<span class="t"> Load save</span></button>
+      <input type="file" id="saveFile" hidden />
+      <div class="menu">
+        <button class="btn icon" id="moreBtn" aria-haspopup="true" title="File">⋯</button>
+        <div class="menu-pop" id="morePop" role="menu">
+          <button id="shareLink" data-i18n="Copy share link">Copy share link</button>
+          <button id="exportJson" data-i18n="Export plan (JSON)">Export plan (JSON)</button>
+          <button id="importJson" data-i18n="Import plan (JSON)">Import plan (JSON)</button>
+          <button id="exportPng" data-i18n="Export PNG of view">Export PNG of view</button>
+          <button id="artOpen" data-i18n="Game graphics…">Game graphics…</button>
+          <button id="tmxOpen" data-i18n="Import custom map (.tmx)">Import custom map (.tmx)</button>
+          <button id="resetTab" data-i18n="Reset this tab">Reset this tab</button>
+          <button id="aboutOpen" data-i18n="About & privacy">About &amp; privacy</button>
+          <label class="menu-lang"><span data-i18n="Language">Language</span> <select id="langSel" aria-label="Language"></select></label>
+          <input type="file" id="jsonFile" accept=".json,application/json" hidden />
+          <input type="file" id="tmxFile" accept=".tmx,.tsx" multiple hidden />
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell" id="shell">
+    <aside class="tools" id="tools" aria-label="Tools"></aside>
+
+    <section class="stage" id="stage">
+      <div class="viewbar">
+        <button class="btn icon" id="toolsToggle" title="Show / hide tools ([)" aria-label="Toggle tools">◧</button>
+        <div class="seg" id="viewSeg"><button data-v="2d" class="on">2D</button><button data-v="3d">3D</button></div>
+        <div class="seg"><button id="undo" title="Undo (Ctrl+Z)">↶</button><button id="redo" title="Redo (Ctrl+Shift+Z / Ctrl+Y)">↷</button></div>
+        <div class="seg"><button id="zoomOut" title="Zoom out (-)" aria-label="Zoom out">−</button><button id="zoomFit" title="Fit (0)" data-i18n="Fit">Fit</button><button id="zoomIn" title="Zoom in (+)" aria-label="Zoom in">+</button></div>
+        <button class="btn" id="shareBtn" title="Copy a link to this plan"><span aria-hidden="true">🔗</span><span class="t" data-i18n="Share"> Share</span></button>
+        <span class="hint" id="hint">Space+drag or middle-drag to pan · wheel to zoom · Shift+drag = rectangle</span>
+        <button class="btn icon panel-toggle" id="panelToggle" title="Show / hide panel (])" aria-label="Toggle panel">◨</button>
+      </div>
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="cv" tabindex="0" role="application" aria-label="Farm map. Arrow keys move the cursor, Enter paints with the current tool, Shift+Enter erases."></canvas>
+        <div id="three" class="three" hidden></div>
+        <div class="busy" id="busy" hidden><div class="spinner"></div><span id="busyText">Optimizing…</span></div>
+      </div>
+      <div class="doc" id="doc" hidden></div>
+      <footer class="stats" id="stats" role="status" aria-live="polite"></footer>
+    </section>
+
+    <aside class="panel" id="panel">
+      <button class="btn panel-close" id="panelClose" aria-label="Close panel">Close ✕</button>
+      <section class="card" id="inspector"><h3>Inspector</h3><div id="inspect" class="inspect muted" data-i18n="Hover a tile">Hover a tile</div></section>
+      <section class="card"><h3>Overlays</h3><div class="toggles" id="overlays"></div></section>
+      <section class="card" id="optCard"><h3>Optimizer</h3><div id="optBox"></div></section>
+      <section class="card"><h3>Legend</h3><div class="legend" id="legend"></div></section>
+    </aside>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog id="artDlg" class="dlg">
+    <h3>Real game graphics</h3>
+    <p>Use the sprites from <b>your own copy</b> of Stardew Valley. Nothing is uploaded and no game art ships with this site: files are read in this browser and remembered only here (IndexedDB).</p>
+    <ol>
+      <li>Find your game folder (Steam: right-click Stardew Valley → Manage → Browse local files).</li>
+      <li>Pick its <code>Content</code> folder. If your files are LZX-compressed, first run <b>StardewXnbHack</b> once and pick the <code>Content (unpacked)</code> folder it creates.</li>
+    </ol>
+    <p><button class="btn primary" id="artPick">Choose Content folder…</button> <input type="file" id="artDir" webkitdirectory multiple hidden /></p>
+    <p id="artStatus" class="muted"></p>
+    <label class="row-check"><input type="checkbox" id="artToggle" checked /> Use game graphics when loaded</label>
+    <div class="dlg-actions"><button class="btn" id="artClear">Forget loaded graphics</button><button class="btn" id="artClose" data-i18n="Close">Close</button></div>
+  </dialog>
+  <dialog id="aboutDlg" class="dlg">
+    <h3>About &amp; privacy</h3>
+    <p><b>Stardew Farm Planner</b> is a free fan tool for Stardew Valley 1.6. It is not affiliated with ConcernedApe.</p>
+    <p><b>Your data stays on your device.</b> Save files, plans and game graphics are processed in your browser and stored in its local storage. There are no accounts, analytics or trackers. A share link carries the plan in the part of the URL after <code>#</code>, which browsers never send to the server.</p>
+    <p>Farm tile data: <a href="https://github.com/hpeinar/stardewplanner" target="_blank" rel="noopener">hpeinar/stardewplanner</a> (Apache-2.0). Sprites are original unless you load your own game files.</p>
+    <div class="dlg-actions"><button class="btn" id="aboutClose" data-i18n="Close">Close</button></div>
+  </dialog>
+</body>
+</html>
+
+<style is:global>
+  :root {
+    --bg: #0d1210; --bg2: #121a16; --panel: #151e19; --line: #24302a; --line2: #2f3d36;
+    --text: #e6ece8; --muted: #8a9a91; --accent: #4ade80; --accent-ink: #062b14;
+    --bad: #f87171; --warn: #fbbf24; --radius: 10px;
+    --font: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 13px/1.45 var(--font); overflow: hidden; -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; height: 100dvh; }
+  button, select, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .muted { color: var(--muted); }
+
+  .top { flex: none; min-height: 52px; display: flex; align-items: center; gap: 14px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--bg2); }
+  .brand { display: flex; align-items: center; gap: 8px; white-space: nowrap; min-width: 0; }
+  .brand b { font-size: 15px; letter-spacing: .2px; }
+  .logo { color: var(--accent); font-size: 18px; }
+  .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+  .tabs { display: flex; gap: 2px; background: var(--bg); padding: 3px; border-radius: 9px; border: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+  .tabs button { border: 0; background: none; padding: 6px 11px; border-radius: 7px; color: var(--muted); white-space: nowrap; }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on { background: var(--line2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+  .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .btn, select { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 6px 11px; height: 32px; white-space: nowrap; }
+  .btn:hover, select:hover { border-color: #3f5148; }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .btn.icon { width: 32px; padding: 0; }
+  .menu { position: relative; }
+  .menu-pop { position: absolute; right: 0; top: 38px; background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; padding: 6px; display: none; flex-direction: column; min-width: 200px; z-index: 20; box-shadow: 0 12px 30px rgba(0,0,0,.45); }
+  .menu-pop.open { display: flex; }
+  .menu-pop button { background: none; border: 0; text-align: left; padding: 8px 10px; border-radius: 6px; }
+  .menu-pop button:hover { background: var(--line); }
+
+  .shell { --tw: 208px; --pw: 292px; flex: 1; min-height: 0; display: grid; grid-template-columns: var(--tw) minmax(0, 1fr) var(--pw); transition: grid-template-columns .18s; }
+  .tools { grid-column: 1; } .stage { grid-column: 2; } .panel { grid-column: 3; }
+  .shell.no-tools { --tw: 0px; } .shell.no-tools .tools { display: none; }
+  .shell.no-panel { --pw: 0px; } .shell.no-panel .panel:not(.open) { display: none; }
+  #toolsToggle.on, #panelToggle.on { color: var(--accent); border-color: rgba(74,222,128,.45); }
+  .panel-close { display: none; }
+  .own { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+  .own b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .doc-seg { margin-bottom: 14px; }
+  .menu-lang { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; }
+  .menu-lang select { height: 28px; padding: 2px 6px; }
+  .dlg { background: var(--panel); color: var(--text); border: 1px solid var(--line2); border-radius: 14px; max-width: 560px; width: calc(100% - 32px); padding: 18px 20px; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+  .dlg::backdrop { background: rgba(0,0,0,.55); }
+  .dlg h3 { margin: 0 0 8px; } .dlg ol { padding-left: 20px; color: #c8d3cc; }
+  .dlg code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+  .dlg a { color: var(--accent); }
+  .dlg-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .row-check { display: flex; gap: 8px; align-items: center; }
+  .step h4 { display: flex; align-items: center; gap: 8px; }
+  .step .num { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 12px; flex: none; }
+  .step ul { margin: 6px 0; padding-left: 18px; }
+  .doc details { margin: 8px 0; max-width: 1100px; } .doc summary { cursor: pointer; padding: 6px 0; }
+  .legend-row { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 10px; font-size: 12px; }
+  .legend-row .lg { display: inline-flex; align-items: center; gap: 6px; } .legend-row i { width: 12px; height: 12px; border-radius: 3px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #cv:focus-visible { outline-offset: -2px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+  .tools { border-right: 1px solid var(--line); overflow-y: auto; padding: 10px 8px 20px; background: var(--bg2); }
+  .tgroup { margin-bottom: 10px; }
+  .tgroup h4 { margin: 6px 6px 4px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); font-weight: 600; }
+  .tool { display: flex; align-items: center; gap: 9px; width: 100%; background: none; border: 1px solid transparent; border-radius: 8px; padding: 4px 6px; text-align: left; }
+  .tool img, .tool .glyph { width: 24px; height: 24px; image-rendering: pixelated; flex: none; border-radius: 4px; }
+  .tool .glyph { display: grid; place-items: center; background: var(--line); font-size: 13px; }
+  .tool .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tool kbd { font: 11px ui-monospace, monospace; color: var(--muted); border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px; }
+  .tool:hover { background: var(--panel); }
+  .tool.on { background: rgba(74,222,128,.12); border-color: rgba(74,222,128,.45); }
+  .tool.on .lbl { color: var(--accent); }
+
+  .stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .viewbar { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 8px; overflow: hidden; }
+  .seg button { background: var(--panel); border: 0; padding: 4px 10px; min-width: 32px; height: 28px; }
+  .seg button + button { border-left: 1px solid var(--line2); }
+  .seg button.on { background: var(--line2); color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .panel-toggle { margin-left: auto; }
+  .canvas-wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #0f1412; }
+  #cv { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+  .three { position: absolute; inset: 0; }
+  .three canvas { display: block; }
+  .busy { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; background: rgba(13,18,16,.72); backdrop-filter: blur(2px); font-size: 14px; }
+  .spinner { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--line2); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .doc { flex: 1; overflow: auto; padding: 22px 26px 40px; }
+
+  .stats { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 7px 10px; border-top: 1px solid var(--line); background: var(--bg2); min-height: 42px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line2); font-size: 12px; white-space: nowrap; }
+  .chip b { font-variant-numeric: tabular-nums; }
+  .chip.ok { border-color: rgba(74,222,128,.5); color: var(--accent); }
+  .chip.bad { border-color: rgba(248,113,113,.55); color: var(--bad); }
+  .chip.badge { margin-left: auto; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+  .panel { border-left: 1px solid var(--line); overflow-y: auto; padding: 10px; background: var(--bg2); display: flex; flex-direction: column; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+  .card h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); font-weight: 600; }
+  .inspect { font-size: 12.5px; min-height: 84px; }
+  .inspect .k { color: var(--muted); }
+  .inspect .row { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+  .yes { color: var(--accent); } .no { color: var(--bad); }
+  .toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .tog { display: flex; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid var(--line2); border-radius: 8px; background: none; font-size: 12px; }
+  .tog .sw { width: 10px; height: 10px; border-radius: 3px; }
+  .tog.on { border-color: rgba(74,222,128,.5); background: rgba(74,222,128,.07); }
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; font-size: 12px; }
+  .legend div { display: flex; align-items: center; gap: 6px; }
+  .legend img, .legend i { width: 16px; height: 16px; image-rendering: pixelated; flex: none; border-radius: 3px; }
+  .opt label { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; font-size: 12.5px; }
+  .opt input[type=number] { width: 58px; background: var(--bg); border: 1px solid var(--line2); border-radius: 6px; padding: 2px 6px; }
+  .opt .btn { width: 100%; margin-top: 8px; }
+  .log { font: 11.5px ui-monospace, monospace; color: var(--muted); margin-top: 6px; white-space: pre-wrap; }
+
+  .toast { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%) translateY(20px); opacity: 0; transition: .2s; background: var(--panel); border: 1px solid var(--line2); padding: 9px 14px; border-radius: 10px; pointer-events: none; z-index: 50; }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
+
+  /* documents: build list, house */
+  .doc h2 { margin: 0 0 4px; font-size: 20px; }
+  .doc h3 { margin: 26px 0 10px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; }
+  .doc p { color: #c8d3cc; max-width: 900px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 14px 0; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
+  .kpi .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--muted); font-size: 12px; }
+  .kpi.ok .v { color: var(--accent); } .kpi.bad .v { color: var(--bad); }
+  table.t { border-collapse: collapse; width: 100%; max-width: 1100px; font-size: 12.5px; }
+  .t th, .t td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .t th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .t td.n, .t th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .t tr:hover td { background: rgba(255,255,255,.02); }
+  .flag { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; margin: 1px 3px 1px 0; background: rgba(251,191,36,.12); color: var(--warn); border: 1px solid rgba(251,191,36,.35); }
+  .okc { color: var(--accent); } .badc { color: var(--bad); }
+  .bar { height: 6px; background: var(--line); border-radius: 4px; overflow: hidden; min-width: 80px; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .bar.short i { background: var(--warn); }
+  .rooms { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; max-width: 1200px; }
+  .room { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .room h4 { margin: 0 0 8px; font-size: 13px; }
+  .chests { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .chest { border-radius: 10px; padding: 10px; color: #0b0f0d; position: relative; min-height: 86px; }
+  .chest b { display: block; font-size: 12.5px; }
+  .chest small { display: block; font-size: 11.5px; opacity: .85; }
+  .chest .n { position: absolute; right: 9px; top: 7px; font-weight: 700; font-size: 18px; opacity: .55; }
+
+  @media (max-width: 1280px) { .shell { --tw: 184px; --pw: 260px; } .sub { display: none; } }
+  @media (max-width: 1040px) {
+    .shell { --tw: 56px; } .shell.no-tools { --tw: 0px; }
+    .tools .lbl, .tools kbd, .tgroup h4 { display: none; }
+    .tool { justify-content: center; padding: 5px 0; }
+    .panel { display: flex !important; position: fixed; right: 0; top: 52px; bottom: 0; width: 300px; transform: translateX(105%); transition: transform .2s; z-index: 15; box-shadow: -10px 0 30px rgba(0,0,0,.4); }
+    .panel.open { transform: none; }
+    .panel-close { display: block; align-self: flex-end; }
+    .hint { display: none; }
+    .brand b { display: none; }
+  }
+  /* phones: tools become a bottom bar, the panel a bottom sheet, tabs a scrolling second row */
+  @media (max-width: 720px) {
+    .top { flex-wrap: wrap; gap: 6px 8px; padding: 6px 8px; }
+    .tabs { order: 3; width: 100%; }
+    .tabs button { padding: 7px 10px; }
+    .actions select { max-width: 150px; }
+    #loadSave .t { display: none; }
+    .shell { --tw: 0px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+    .stage { grid-row: 1; grid-column: 1; }
+    .tools { grid-row: 2; grid-column: 1; display: flex; gap: 2px; overflow-x: auto; overflow-y: hidden; padding: 6px; border-right: 0; border-top: 1px solid var(--line); scrollbar-width: none; }
+    .shell.no-tools .tools { display: none; }
+    .tgroup { display: flex; gap: 2px; margin: 0; padding-right: 6px; border-right: 1px solid var(--line); }
+    .tool { width: 44px; height: 44px; flex: none; }
+    .tool img, .tool .glyph { width: 28px; height: 28px; }
+    .panel { top: auto; left: 0; width: 100%; height: 62dvh; border-left: 0; border-top: 1px solid var(--line2); border-radius: 16px 16px 0 0; transform: translateY(105%); }
+    .viewbar { padding: 6px; gap: 6px; }
+    .stats { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+    .chip.badge { margin-left: 0; }
+    .doc { padding: 14px 12px 30px; }
+    .doc table.t { display: block; overflow-x: auto; }
+    .kpis { grid-template-columns: 1fr 1fr; }
+    .kpi .v { font-size: 18px; }
+    .toast { bottom: 90px; max-width: 92vw; }
+  }
+
+</style>
+
+<script>
+  import '../app/main.ts';
+</script>
