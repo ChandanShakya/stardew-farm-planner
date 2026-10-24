@@ -56,7 +56,7 @@ export function currentPlan(s: SaveData): Plan {
 export function optimizeBase(cur: Plan, title = 'Optimized farm'): Plan {
   const p = blankPlan(cur.key, title, FARM_DEFS[cur.key], { crows: true, junimo: true });
   p.base = cur.base;
-  p.buildings = cur.buildings.filter(b => b.fixed).map(b => ({ ...b }));
+  p.buildings = cur.buildings.filter(b => b.fixed && b.type !== 'bin').map(b => ({ ...b })); // the yard packer places the bin
   for (const f of FARM_DEFS[cur.key].fixed ?? []) p.buildings.push({ id: 900 + p.buildings.length, type: 'coop', x: f[1], y: f[2], w: f[3], h: f[4], fixed: true, label: 'Starting ' + f[0] });
   return p;
 }
@@ -70,7 +70,7 @@ export function defaultPlan(key: string): Plan {
   p.buildings = [
     { id: 1, type: 'farmhouse', x: 60, y: 10, w: 9, h: 5, fixed: true },
     { id: 2, type: 'greenhouse', x: gx, y: gy, w: 7, h: 6, fixed: true },
-    { id: 3, type: 'bin', x: 71, y: 14, w: 2, h: 1 },
+    { id: 3, type: 'bin', x: 71, y: 14, w: 2, h: 1, fixed: true }, // the map tiles under the starting bin are marked blocked
   ];
   for (const f of def.fixed ?? []) p.buildings.push({ id: 4, type: 'coop', x: f[1], y: f[2], w: f[3], h: f[4], fixed: true, label: 'Starting ' + f[0] });
   return p;

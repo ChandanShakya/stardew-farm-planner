@@ -2,6 +2,7 @@
 // Nothing from the game ships with this app: the user picks their Content folder (raw .xnb or the
 // "Content (unpacked)" PNGs from StardewXnbHack); the textures are decoded in the browser and
 // cached in this browser's IndexedDB only.
+import { lzxXnb } from './lzx.ts';
 
 export type Tex = ImageBitmap;
 const KEYS: Record<string, string[]> = {
@@ -42,7 +43,7 @@ export async function loadFromFiles(files: FileList | File[]): Promise<{ loaded:
     if (!file) continue;
     try {
       const bmp = file.name.endsWith('.png') ? await createImageBitmap(file) : await decodeXnb(new Uint8Array(await file.arrayBuffer()));
-      tex[name] = bmp; loaded.push(name);
+      tex[name] = bmp; loaded.push(name); framesCache.clear();
       await idbPut(name, bmp);
     } catch (e) { errors.push(`${file.name}: ${(e as Error).message}`); }
   }
@@ -54,15 +55,16 @@ export async function restoreCache() {
     for (const [k, blob] of all) tex[k] = await createImageBitmap(blob);
   } catch { /* no IndexedDB (private mode): graphics just aren't remembered */ }
 }
-export async function clearArt() { for (const k of Object.keys(tex)) delete tex[k]; try { await idbClear(); } catch { /* ignore */ } }
+export async function clearArt() { framesCache.clear(); for (const k of Object.keys(tex)) delete tex[k]; try { await idbClear(); } catch { /* ignore */ } }
 
-// ---------- XNB Texture2D (uncompressed or LZ4; LZX asks the user to unpack) ----------
+// ---------- XNB Texture2D (uncompressed, LZX — what the PC game ships — or LZ4) ----------
 async function decodeXnb(b: Uint8Array): Promise<ImageBitmap> {
   if (b[0] !== 0x58 || b[1] !== 0x4e || b[2] !== 0x42) throw new Error('not an XNB file');
   const flags = b[5];
   let body: Uint8Array;
-  if (flags & 0x80) throw new Error('LZX-compressed; unpack the Content folder with StardewXnbHack and pick "Content (unpacked)"');
-  if (flags & 0x40) {
+  const head = new DataView(b.buffer, b.byteOffset);
+  if (flags & 0x80) body = lzxXnb(b.subarray(14), head.getUint32(6, true) - 14, head.getUint32(10, true));
+  else if (flags & 0x40) {
     const size = new DataView(b.buffer, b.byteOffset).getUint32(10, true);
     body = lz4(b.subarray(14), size);
   } else body = b.subarray(10);
@@ -135,6 +137,7 @@ export type Src = { img: Tex; sx: number; sy: number; sw: number; sh: number };
 export function itemSrc(code: string, note?: string, defaultCrop = 'Ancient Fruit'): Src | null | undefined {
   switch (code) {
     case 'C': return OBJ(CROP_ID[note ?? ''] ?? CROP_ID[defaultCrop]);
+    case 'Y': return OBJ(595); // Fairy Rose
     case 'I': return OBJ(645);
     case 'Q': return OBJ(621);
     case 'S': return OBJ(599);
@@ -153,9 +156,60 @@ export const hoeSrc = () => tex.hoe && { img: tex.hoe, sx: 0, sy: 0, sw: 16, sh:
 export const floorSrc = () => tex.floor && { img: tex.floor, sx: 64 + 16, sy: 16, sw: 16, sh: 16 }; // Stone Floor, inner piece
 export const fenceSrc = () => tex.fence && { img: tex.fence, sx: 0, sy: 0, sw: 16, sh: 32 };
 export const treeSrc = () => (tex.oak ?? tex.pine) && { img: (tex.oak ?? tex.pine)!, sx: 0, sy: 0, sw: 48, sh: 96 };
-export function buildingSrc(type: string, w: number): Src | null {
-  const img = tex[type]; if (!img) return null;
-  const sw = type === 'farmhouse' ? Math.min(img.width, 160) : Math.min(img.width, w * 16);
-  const sh = type === 'farmhouse' ? Math.min(img.height, 144) : type === 'junimo' ? Math.min(img.height, 64) : img.height;
-  return { img, sx: 0, sy: 0, sw, sh };
+// Building sheets pack several frames: ruined + repaired greenhouse, the three house levels,
+// obelisk glow frames, fish pond pieces, seasonal huts. Frames are found in two passes:
+//  1. split the first footprint-wide column at fully transparent rows (gaps);
+//  2. a block taller than a building of this footprint could be (footprint + roof) is cut into
+//     equal frames (houses: 3 levels, greenhouse: 2 states) even when they touch.
+// Each frame is trimmed to its opaque pixels. The default frame per building can be changed in
+// the Game graphics dialog; the choice is remembered.
+const framesCache = new Map<string, Src[]>();
+let houseLevel = 3;
+export const setHouseLevel = (n: number) => { houseLevel = n; };
+const FRAME_KEY = 'sdv-planner-v7:artFrame:';
+export function buildingFrames(type: string, w: number, h: number): Src[] {
+  const img = tex[type]; if (!img) return [];
+  const key = `${type}:${w}x${h}`;
+  const hit = framesCache.get(key); if (hit) return hit;
+  const one = type === 'farmhouse' ? 160 : w * 16, fw = type === 'pond' ? Math.min(img.width, one) : img.width < one * 1.5 ? img.width : Math.min(img.width, one), H = img.height;
+  const c = new OffscreenCanvas(fw, H), g = c.getContext('2d')!;
+  g.drawImage(img, 0, 0, fw, H, 0, 0, fw, H);
+  const px = g.getImageData(0, 0, fw, H).data, on = (x: number, y: number) => px[(y * fw + x) * 4 + 3] > 16;
+  const rowOn = (y: number) => { for (let x = 0; x < fw; x++) if (on(x, y)) return true; return false; };
+  const segs: [number, number][] = [];
+  for (let y = 0, start = -1, gap = 0; y <= H; y++) {
+    const r = y < H && rowOn(y);
+    if (r) { if (start < 0) start = y; gap = 0; }
+    else if (start >= 0 && (++gap > 2 || y === H)) { segs.push([start, y - gap]); start = -1; gap = 0; }
+  }
+  const minH = h * 16 * 0.75, maxH = h * 16 + 112;
+  let frames: [number, number][] = segs;
+  if (type === 'pond') frames = [[0, Math.min(H, h * 16) - 1]]; // drawn top-down: the footprint square at the top-left
+  else if (segs.some(([a, b]) => b - a + 1 > maxH)) {
+    // frames touch: cut the whole sheet into equal frames of a plausible building height
+    let k = 0; for (let n = 2; n <= 8 && !k; n++) if (H / n >= minH && H / n <= maxH) k = n;
+    if (k) frames = Array.from({ length: k }, (_, i) => [Math.round(i * H / k), Math.round((i + 1) * H / k) - 1] as [number, number]);
+  }
+  const out: Src[] = [];
+  for (const [a, b] of frames) {
+    let x0 = fw, x1 = -1, y0 = b, y1 = a;
+    for (let y = a; y <= b; y++) for (let x = 0; x < fw; x++) if (on(x, y)) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (x1 >= x0 && (y1 - y0 + 1) >= 8) out.push({ img, sx: x0, sy: y0, sw: x1 - x0 + 1, sh: y1 - y0 + 1 });
+  }
+  framesCache.set(key, out);
+  return out;
 }
+export function defaultFrame(type: string, frames: Src[]) {
+  if (type === 'farmhouse') return Math.min(Math.max(0, houseLevel >= 2 ? 2 : houseLevel), frames.length - 1);
+  if (type === 'greenhouse') return frames.length - 1; // repaired
+  let best = 0; frames.forEach((f, i) => { if (f.sh * f.sw > frames[best].sh * frames[best].sw * 1.15) best = i; }); // biggest piece (pond base etc.)
+  return best;
+}
+export const frameChoice = (type: string): number | null => { try { const v = localStorage.getItem(FRAME_KEY + type); return v === null ? null : Number(v); } catch { return null; } };
+export const setFrameChoice = (type: string, i: number | null) => { try { if (i === null) localStorage.removeItem(FRAME_KEY + type); else localStorage.setItem(FRAME_KEY + type, String(i)); } catch { /* ignore */ } };
+export function buildingSrc(type: string, w: number, h: number): Src | null {
+  const fr = buildingFrames(type, w, h); if (!fr.length) return null;
+  const pick = frameChoice(type);
+  return fr[pick !== null && pick < fr.length ? pick : defaultFrame(type, fr)];
+}
+export const loadedBuildingTypes = () => Object.keys(KEYS).filter(k => tex[k] && k !== 'objects' && k !== 'craftables' && k !== 'hoe' && k !== 'floor' && k !== 'fence' && k !== 'oak' && k !== 'pine' && k !== 'fruit');

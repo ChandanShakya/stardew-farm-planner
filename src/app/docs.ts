@@ -28,7 +28,8 @@ export function houseHTML(s: SaveData | null) {
   const other = inv.filter(([, v]) => !known.has(v.cat));
   groups[9].items.push(...other);
   const fridge = inv.filter(([, v]) => FRIDGE_CATS.includes(v.cat));
-  const casks = s ? Object.entries(s.placedBy).filter(([k]) => k.startsWith('Cellar')).reduce((t, [, o]) => t + (o.Cask ?? 0), 0) : 0;
+  // only the cellar you can enter (Cellar2..8 belong to co-op cabins, see the Interiors tab)
+  const casks = s ? ((s.cellars ?? []).find(c => c.owner === 'you') ?? (s.cellars ?? []).find(c => c.name === 'Cellar'))?.casks.length ?? 0 : 0;
   const machines = s ? Object.entries(s.placedAll).filter(([k]) => /^(Keg|Preserves Jar|Furnace|Dehydrator|Fish Smoker|Crystalarium|Seed Maker|Loom|Oil Maker|Mayonnaise Machine|Cheese Press|Recycling Machine|Bone Mill|Charcoal Kiln|Geode Crusher|Worm Bin|Bee House)$/.test(k)) : [];
   const chestCount = s ? s.chests.length : 0;
   const top = (items: [string, { total: number }][]) => items.sort((a, b) => b[1].total - a[1].total).slice(0, 4).map(([n, v]) => `${esc(n)} ${f(v.total)}`).join(' · ');

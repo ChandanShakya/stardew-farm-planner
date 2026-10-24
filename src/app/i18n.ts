@@ -25,7 +25,7 @@ const D: Record<string, Record<string, string>> = {
     'Floor every open tile (weed-proof)': 'Pavimentar todo (sin malas hierbas)', 'Tapper trees': 'Árboles con grifo', 'Bee houses': 'Colmenas',
     'Fix coverage gaps': 'Corregir huecos', 'Re-optimize this farm': 'Reoptimizar esta granja', 'Best possible → Optimized tab': 'Lo mejor posible → Optimizada',
     'With what I own → its tab': 'Con lo que tengo → su pestaña', 'Re-lay sprinklers': 'Recolocar aspersores', 'Re-optimize with what I own': 'Reoptimizar con lo que tengo',
-    'Keep buildings where they are': 'Dejar los edificios donde están', Share: 'Compartir',
+    'Keep buildings where they are': 'Dejar los edificios donde están', Share: 'Compartir', 'Flower (bees)': 'Flor (abejas)', 'Lightning rods': 'Pararrayos',
   },
   pt: {
     'Current farm': 'Fazenda atual', 'Optimized ★': 'Otimizada ★', 'Use what I own': 'Com o que tenho', 'Ginger Island': 'Ilha Gengibre',
@@ -50,7 +50,7 @@ const D: Record<string, Record<string, string>> = {
     'Floor every open tile (weed-proof)': 'Pavimentar tudo (sem ervas daninhas)', 'Tapper trees': 'Árvores com torneira', 'Bee houses': 'Colmeias',
     'Fix coverage gaps': 'Corrigir falhas', 'Re-optimize this farm': 'Reotimizar esta fazenda', 'Best possible → Optimized tab': 'Melhor possível → Otimizada',
     'With what I own → its tab': 'Com o que tenho → sua aba', 'Re-lay sprinklers': 'Reposicionar regadores', 'Re-optimize with what I own': 'Reotimizar com o que tenho',
-    'Keep buildings where they are': 'Manter construções no lugar', Share: 'Compartilhar',
+    'Keep buildings where they are': 'Manter construções no lugar', Share: 'Compartilhar', 'Flower (bees)': 'Flor (abelhas)', 'Lightning rods': 'Para-raios',
   },
 };
 let lang = 'en';

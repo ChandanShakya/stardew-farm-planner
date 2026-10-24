@@ -23,6 +23,7 @@ export const TERRAIN: Record<string, { name: string; till: boolean; build: boole
 // ---------- tile items ----------
 export const ITEMS: Record<string, { name: string; key: string; crop?: boolean; solid?: boolean }> = {
   C: { name: 'Crop', key: 'c', crop: true },
+  Y: { name: 'Flower (for bee houses)', key: '', crop: true },
   I: { name: 'Iridium Sprinkler', key: 'i', solid: true },
   Q: { name: 'Quality Sprinkler', key: 'q', solid: true },
   S: { name: 'Sprinkler', key: '', solid: true },
@@ -78,7 +79,8 @@ export const SAVE_BUILDING: Record<string, string> = {
 };
 
 export type PB = { id: number; type: string; x: number; y: number; w: number; h: number; fixed?: boolean; label?: string };
-export type Rules = { crows: boolean; junimo: boolean };
+// layout: strict checks for planned layouts (tree spacing, bee-house flowers); off for the as-is farm
+export type Rules = { crows: boolean; junimo: boolean; layout?: boolean };
 export type Plan = {
   key: string; title: string; w: number; h: number;
   base: string;            // terrain codes, w*h chars
@@ -122,7 +124,7 @@ export const hutCenter = (b: { x: number; y: number }) => [b.x + 1, b.y + 1] as 
 export type Analysis = {
   crops: number; sprinklers: Record<string, number>; huts: number; scarecrows: Record<string, number>;
   water: Uint8Array; junimo: Uint8Array; crow: Uint8Array; occupied: Int32Array;
-  bad: { water: number[]; junimo: number[]; crow: number[]; placement: number[] };
+  bad: { water: number[]; junimo: number[]; crow: number[]; placement: number[]; layout: number[] };
   problems: number; counts: Record<string, number>; buildingCounts: Record<string, number>;
 };
 
@@ -136,7 +138,7 @@ export function analyze(p: Plan): Analysis {
   const N = p.w * p.h, water = new Uint8Array(N), junimo = new Uint8Array(N), crow = new Uint8Array(N);
   const counts: Record<string, number> = {}, bc: Record<string, number> = {};
   const occ = occupancy(p);
-  const bad = { water: [] as number[], junimo: [] as number[], crow: [] as number[], placement: [] as number[] };
+  const bad = { water: [] as number[], junimo: [] as number[], crow: [] as number[], placement: [] as number[], layout: [] as number[] };
   for (let i = 0; i < N; i++) {
     const c = p.tiles[i]; if (!c) continue;
     counts[c] = (counts[c] ?? 0) + 1;
@@ -148,7 +150,7 @@ export function analyze(p: Plan): Analysis {
       for (const [dx, dy] of crowTiles(c)) if (inb(p, x + dx, y + dy)) crow[idx(p, x + dx, y + dy)] = 1;
     }
     const t = TERRAIN[p.base[i]];
-    if (occ[i] >= 0 || !t?.walk || (c === 'C' && !t.till)) bad.placement.push(i);
+    if (occ[i] >= 0 || !t?.walk || ((c === 'C' || c === 'Y') && !t.till)) bad.placement.push(i);
   }
   let huts = 0;
   for (const b of p.buildings) {
@@ -164,17 +166,35 @@ export function analyze(p: Plan): Analysis {
     }
   }
   let crops = 0;
-  for (let i = 0; i < N; i++) if (p.tiles[i] === 'C') {
-    crops++;
+  for (let i = 0; i < N; i++) if (p.tiles[i] === 'C' || p.tiles[i] === 'Y') {
+    if (p.tiles[i] === 'C') crops++;
     if (!water[i]) bad.water.push(i);
     if (p.rules.junimo && huts && !junimo[i]) bad.junimo.push(i); // no huts = hand harvest, nothing to check
     if (p.rules.crows && !crow[i]) bad.crow.push(i);
   }
   bad.placement = [...new Set(bad.placement)];
+  if (p.rules.layout) {
+    const at = (x: number, y: number) => (inb(p, x, y) ? p.tiles[idx(p, x, y)] : '');
+    for (let i = 0; i < N; i++) {
+      const c = p.tiles[i]; if (!c) continue;
+      const x = i % p.w, y = (i / p.w) | 0;
+      const near = (test: (n: string, j: number) => boolean) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if ((dx || dy) && inb(p, x + dx, y + dy) && test(at(x + dx, y + dy), idx(p, x + dx, y + dy))) return true; return false; };
+      // a wild tree can't grow to full size next to another tree
+      if ((c === 'A' || c === 'T') && near(n => n === 'A' || n === 'T' || n === 'U')) bad.layout.push(i);
+      // a fruit tree needs its 8 surrounding tiles clear
+      if (c === 'U' && near((n, j) => (!!n && n !== 'W' && n !== 'P' && n !== 'D') || occ[j] >= 0)) bad.layout.push(i);
+      // a bee house only makes flower honey with a flower within 5 tiles
+      if (c === 'E') {
+        let ok = false;
+        for (let dy = -5; dy <= 5 && !ok; dy++) for (let dx = -5; dx <= 5; dx++) if (Math.abs(dx) + Math.abs(dy) <= 5 && at(x + dx, y + dy) === 'Y') { ok = true; break; }
+        if (!ok) bad.layout.push(i);
+      }
+    }
+  }
   return {
     crops, huts, water, junimo, crow, occupied: occ, bad, counts, buildingCounts: bc,
     sprinklers: { I: counts.I ?? 0, Q: counts.Q ?? 0, S: counts.S ?? 0 },
     scarecrows: { R: counts.R ?? 0, r: counts.r ?? 0 },
-    problems: bad.water.length + bad.junimo.length + bad.crow.length + bad.placement.length,
+    problems: bad.water.length + bad.junimo.length + bad.crow.length + bad.placement.length + bad.layout.length,
   };
 }

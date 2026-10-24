@@ -98,3 +98,62 @@ test('embedded plans: no scarecrow or sprinkler on roads, porches or exits', asy
     assert.deepEqual(bad, [], `${k}: equipment on walkways at ${bad.map(i => `${i % p.w},${(i / p.w) | 0}`).join(' ')}`);
   }
 });
+
+test('utility pass: rods kept off crops/walkways, every bee house near a flower, trees spaced', async () => {
+  const plans = (await import('../src/data/plans.json', { with: { type: 'json' } })).default as Record<string, Plan>;
+  const save = (await import('../src/data/save.json', { with: { type: 'json' } })).default as { placedAll: Record<string, number> };
+  for (const k of ['optimized', 'owned']) {
+    const p = plans[k], a = analyze(p);
+    assert.equal(a.counts.L, save.placedAll['Lightning Rod'], `${k}: keeps every lightning rod`);
+    p.tiles.forEach((t, i) => { if (t === 'L') assert.ok(!'pw~X'.includes(p.base[i]), `${k}: rod on walkway at ${i % p.w},${(i / p.w) | 0}`); });
+    assert.ok((a.counts.Y ?? 0) >= 1 || !a.counts.E, `${k}: bee houses get a flower`);
+    assert.equal(a.bad.layout.length, 0, `${k}: tree spacing / bee flower problems`);
+  }
+});
+
+test('layout rules: adjacent wild trees and a flowerless bee house are flagged', () => {
+  const p = field(9, 9); p.rules.layout = true;
+  p.tiles[0] = 'A'; p.tiles[1] = 'A'; p.tiles[40] = 'E';
+  assert.equal(analyze(p).bad.layout.length, 3);
+  p.tiles[1] = ''; p.tiles[2] = 'A'; p.tiles[44] = 'Y';
+  assert.equal(analyze(p).bad.layout.length, 0);
+});
+
+test('embedded plans: every map exit is reachable on foot from the farmhouse porch', async () => {
+  const plans = (await import('../src/data/plans.json', { with: { type: 'json' } })).default as Record<string, Plan>;
+  const { occupancy } = await import('../src/app/engine.ts');
+  for (const k of ['optimized', 'owned']) {
+    const p = plans[k], occ = occupancy(p), house = p.buildings.find(b => b.type === 'farmhouse')!;
+    const passable = (i: number) => !'~X'.includes(p.base[i]) && occ[i] < 0 && ['', 'C', 'Y', 'P', 'D', 'W'].includes(p.tiles[i]);
+    const start = (house.y + house.h) * p.w + house.x + 4, seen = new Uint8Array(p.w * p.h), q = [start]; seen[start] = 1;
+    for (let h = 0; h < q.length; h++) { const j = q[h], x = j % p.w; for (const n of [j - 1, j + 1, j - p.w, j + p.w]) if (n >= 0 && n < seen.length && Math.abs((n % p.w) - x) <= 1 && !seen[n] && passable(n)) { seen[n] = 1; q.push(n); } }
+    const exits = [...p.base].map((c, i) => (c === 'w' ? i : -1)).filter(i => i >= 0);
+    // every exit group must have at least one reachable tile
+    const unreached = exits.filter(i => !seen[i] && ![i - 1, i + 1, i - p.w, i + p.w].some(n => seen[n] && p.base[n] === 'w'));
+    const groups = new Set(unreached.map(i => `${Math.round((i % p.w) / 8)},${Math.round(((i / p.w) | 0) / 8)}`));
+    assert.ok(exits.some(i => seen[i]), `${k}: no exit reachable`);
+    assert.equal([...groups].filter(g => !exits.some(i => seen[i] && `${Math.round((i % p.w) / 8)},${Math.round(((i / p.w) | 0) / 8)}` === g)).length, 0, `${k}: blocked exits near ${[...groups].join(' ')}`);
+  }
+});
+
+test('optimizer never puts an object under a building on any farm type', async () => {
+  const { FARM_KEYS } = await import('../src/app/engine.ts');
+  const { defaultPlan, optimizeBase } = await import('../src/app/fromSave.ts');
+  const { DEFAULT_YARD } = await import('../src/app/optimize.ts');
+  for (const k of ['wilderness', 'fourcorners'].filter(x => FARM_KEYS.includes(x))) {
+    const r = optimizePlan(optimizeBase(defaultPlan(k)), { buildings: DEFAULT_YARD, tappers: 12, beeHouses: 6, rods: 10, huts: true, crows: true, fence: true, floorAll: true, restarts: 6 });
+    assert.equal(analyze(r.plan).problems, 0, k);
+  }
+});
+
+test('shipped blank-farm layouts: every farm type, 0 problems, no player data', async () => {
+  const d = (await import('../src/data/defaults.json', { with: { type: 'json' } })).default as unknown as { farms: Record<string, Plan & { tiles: string }> };
+  const { FARM_KEYS } = await import('../src/app/engine.ts');
+  for (const k of FARM_KEYS) {
+    const pk = d.farms[k]; assert.ok(pk, `${k} missing`);
+    const p = { ...pk, tiles: [...pk.tiles].map(c => (c === ' ' ? '' : c)) } as Plan;
+    assert.equal(analyze(p).problems, 0, `${k}: problems`);
+  }
+  const save = (await import('../src/data/save.json', { with: { type: 'json' } })).default as { player: string };
+  assert.ok(!JSON.stringify(d).includes(save.player), 'fixture player name leaked into shipped data');
+});

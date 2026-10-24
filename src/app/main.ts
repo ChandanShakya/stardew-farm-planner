@@ -10,20 +10,30 @@ import type { View3D } from './render3d.ts';
 import { buildHTML, houseHTML } from './docs.ts';
 import { cropsHTML, profsOf } from './crops.ts';
 import { diffTiles, movesHTML } from './moves.ts';
-import { drawShed, interiorsHTML } from './interiors.ts';
-import { artCount, artReady, clearArt, loadFromFiles, restoreCache, setArtOn } from './gameart.ts';
+import { drawCellar, drawShed, interiorsHTML, myCellar } from './interiors.ts';
+import { artCount, artReady, buildingFrames, clearArt, defaultFrame, frameChoice, loadedBuildingTypes, loadFromFiles, restoreCache, setArtOn, setFrameChoice, setHouseLevel } from './gameart.ts';
 import { parseTmx } from './tmx.ts';
 import { decodeShare, encodeShare } from './share.ts';
-import { detectLang, LANGS, setLang, t as tr } from './i18n.ts';
+import { detectLang, getLang, LANGS, setLang, t as tr } from './i18n.ts';
 import OptWorker from './opt.worker.ts?worker&inline';
-import SAVE from '../data/save.json';
-import PLANS from '../data/plans.json';
+// Shipped plans: optimized layouts for every blank farm type + the island and greenhouse beds.
+// No player data ships with the site; a save is only ever read from the user's own device.
+import DEFAULTS from '../data/defaults.json';
+type Packed = ReturnType<typeof pack>;
+const DEF = DEFAULTS as unknown as { farms: Record<string, Packed>; island: Packed; greenhouse: Packed };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const ACCENT = '#4ade80';
+const ACCENT = '#f3c34b'; // map cursor / selection: gold reads well on soil and grass
 const STORE = 'sdv-planner-v7';
-// bump when embedded maps/plans change in a way that invalidates old autosaves (v2: lake interiors fixed)
-const PLAN_KEY = 'plans-v2:';
+// Autosaves are keyed by a fingerprint of the built-in maps + plans: when the shipped data changes
+// (new optimizer rules, map fixes), stale autosaves stop loading instead of hiding the new plans.
+const PLAN_KEY = (() => {
+  let h = 2166136261;
+  const src = JSON.stringify([FARM_DEFS.standard.rows, DEFAULTS]);
+  for (let i = 0; i < src.length; i++) { h ^= src.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return 'plans-' + (h >>> 0).toString(36) + ':';
+})();
+try { for (const k of Object.keys(localStorage)) if (k.startsWith(STORE + ':plans') && !k.startsWith(STORE + ':' + PLAN_KEY)) localStorage.removeItem(k); } catch { /* storage unavailable */ }
 
 // ---------- state ----------
 type TabKey = 'current' | 'optimized' | 'owned' | 'island' | 'greenhouse' | 'house' | 'build' | 'moves' | 'crops' | 'interiors';
@@ -35,10 +45,10 @@ type GridKey = 'current' | 'optimized' | 'owned' | 'island' | 'greenhouse';
 const customMap = load<typeof FARM_DEFS[string]>('customMap');
 if (customMap) { FARM_DEFS.custom = customMap; if (!FARM_KEYS.includes('custom')) FARM_KEYS.push('custom'); }
 setLang(load<string>('lang') ?? detectLang());
-let save: SaveData | null = load<SaveData>('save') ?? (SAVE as SaveData);
-let farmKey: string = load<string>('farm') ?? farmKeyOf(save);
+let save: SaveData | null = load<SaveData>('save');
+let farmKey: string = load<string>('farm') ?? (save ? farmKeyOf(save) : 'standard');
 let plans = {} as Record<GridKey, Plan | null>;
-let tab: TabKey = (load<TabKey>('tab') ?? 'optimized');
+let tab: TabKey = (load<TabKey>('tab') ?? 'current');
 let view: '2d' | '3d' = '2d';
 let tool = 'C', rectMode = false;
 let ov: Overlays = { water: false, junimo: false, crow: false, problems: true, grid: true, labels: true, diff: false, ...load<Partial<Overlays>>('ov') };
@@ -64,15 +74,14 @@ function loadFarm(key: string) {
   if (!FARM_DEFS[key]) key = 'standard';
   farmKey = key;
   const saved = load<Record<string, ReturnType<typeof pack> | null>>(PLAN_KEY + key);
-  const fromSave = save && farmKeyOf(save) === key;
-  const d = SAVE as SaveData; // the embedded plans were computed from this exact save
-  const embedded = fromSave && save!.player === d.player && save!.money === d.money && save!.day === d.day && save!.year === d.year;
+  const fromSave = !!save && farmKeyOf(save) === key;
   plans = {
     current: saved?.current ? unpack(saved.current) : fromSave ? currentPlan(save!) : defaultPlan(key),
-    optimized: saved?.optimized ? unpack(saved.optimized) : embedded ? unpack(PLANS.optimized as Plan) : null,
-    owned: saved?.owned ? unpack(saved.owned) : embedded ? unpack(PLANS.owned as Plan) : null,
-    island: saved?.island ? unpack(saved.island) : unpack(PLANS.island as Plan),
-    greenhouse: saved?.greenhouse ? unpack(saved.greenhouse) : unpack(PLANS.greenhouse as Plan),
+    // a loaded save gets its own optimized plan (computed in the worker); blank farms use the shipped one
+    optimized: saved?.optimized ? unpack(saved.optimized) : !fromSave && DEF.farms[key] ? unpack(DEF.farms[key]) : null,
+    owned: saved?.owned ? unpack(saved.owned) : null,
+    island: saved?.island ? unpack(saved.island) : unpack(DEF.island),
+    greenhouse: saved?.greenhouse ? unpack(saved.greenhouse) : unpack(DEF.greenhouse),
   };
   store('farm', key);
   if (FARM_DEFS[key].approx) toast('Meadowlands terrain is approximate (no verified tile data). Load your save to calibrate it.', 6000);
@@ -94,7 +103,7 @@ type Tool = { id: string; label: string; key: string; shift?: boolean; icon?: st
 const BLIB = ['junimo', 'barn', 'coop', 'silo', 'shed', 'mill', 'stable', 'slime', 'pond', 'well', 'earthob', 'waterob', 'desertob', 'islandob', 'clock', 'bin', 'petbowl', 'cabin'];
 const TOOLS: [string, Tool[]][] = [
   ['Edit', [{ id: 'select', label: 'Select / move', key: 'V', glyph: '⬚' }, { id: 'erase', label: 'Eraser', key: 'E', glyph: '⌫' }, { id: 'fill', label: 'Fill area', key: 'B', glyph: '◧' }, { id: 'rect', label: 'Rectangle mode', key: 'R', glyph: '▭' }]],
-  ['Crops', [{ id: 'C', label: 'Crop', key: 'C', icon: 'C' }]],
+  ['Crops', [{ id: 'C', label: 'Crop', key: 'C', icon: 'C' }, { id: 'Y', label: 'Flower (bees)', key: 'U', icon: 'Y' }]],
   ['Sprinklers', [{ id: 'I', label: 'Iridium (5×5)', key: 'I', icon: 'I' }, { id: 'Q', label: 'Quality (3×3)', key: 'Q', icon: 'Q' }, { id: 'S', label: 'Basic (4 tiles)', key: 'S', icon: 'S' }]],
   ['Scarecrows', [{ id: 'R', label: 'Deluxe (r 16)', key: 'D', icon: 'R' }, { id: 'r', label: 'Scarecrow (r 8)', key: 'K', icon: 'r' }]],
   ['Fences & paths', [{ id: 'F', label: 'Fence', key: 'F', icon: 'F' }, { id: 'G', label: 'Gate', key: 'G', icon: 'G' }, { id: 'P', label: 'Path / flooring', key: 'P', icon: 'P' }]],
@@ -123,7 +132,10 @@ function pick(id: string) {
 
 // ---------- tabs / layout ----------
 function renderTabs() {
-  $('tabs').innerHTML = TABS.map(([k, n]) => `<button role="tab" data-tab="${k}" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}">${tr(n)}</button>`).join('');
+  // short English labels keep the tab row on one line; other languages use the full translation
+  const SHORT: Record<string, string> = { current: 'Current', optimized: 'Optimized ★', owned: 'What I own', island: 'Island', greenhouse: 'Greenhouse', build: 'Build list', moves: 'Moves', crops: 'Crops', house: 'Chests', interiors: 'Interiors' };
+  $('tabs').innerHTML = TABS.map(([k, n]) => `<button role="tab" data-tab="${k}" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}" title="${tr(n)}">${getLang() === 'en' ? SHORT[k] : tr(n)}</button>`).join('');
+  $('tabs').querySelector('.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 $('tabs').addEventListener('click', e => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-tab]'); if (b) setTab(b.dataset.tab as TabKey); });
 function setTab(t: TabKey) {
@@ -131,20 +143,28 @@ function setTab(t: TabKey) {
   const grid = GRID.includes(t);
   $('canvasWrap').hidden = !grid; $('doc').hidden = grid; $('stats').hidden = !grid;
   document.querySelector<HTMLElement>('.viewbar')!.style.display = grid ? '' : 'none';
-  $('tools').style.visibility = grid ? '' : 'hidden';
-  if (!grid) { v3?.stop(); renderDoc(); }
-  if ((t === 'optimized' || t === 'owned') && !plans[t] && plans.current) runOptimize(t);
+  $('shell').classList.toggle('doc-mode', !grid);
+  if (!grid) { v3?.stop(); renderDoc(); } else { int3dDispose?.(); int3dDispose = null; }
+  if ((t === 'optimized' || t === 'owned') && !plans[t] && plans.current && (t === 'optimized' || ownsSomething())) runOptimize(t);
   changed(true);
 }
 
+let intView: '2d' | '3d' = load<'2d' | '3d'>('intView') ?? '2d', int3dDispose: (() => void) | null = null;
+const NEED_SAVE = (what: string) => `<div class="need-save"><p><b>No save loaded.</b> ${what}</p><p><button class="btn primary" data-act="load">⇪ Load your save</button> <button class="btn" data-act="howto">▶ How to find your save</button></p></div>`;
 function renderDoc() {
   const doc = $('doc');
-  if (tab === 'house') { doc.innerHTML = houseHTML(save); return; }
-  if (tab === 'interiors') { doc.innerHTML = interiorsHTML(save); drawShed(save); return; }
+  if (tab === 'house') { doc.innerHTML = save ? houseHTML(save) : '<h2>House &amp; chests</h2>' + NEED_SAVE('This tab sorts everything you own into a chest system, so it needs your save.'); return; }
+  int3dDispose?.(); int3dDispose = null;
+  if (tab === 'interiors') {
+    doc.innerHTML = save ? interiorsHTML(save, intView) : '<h2>Interiors</h2>' + NEED_SAVE('This tab lays out your machines and casks, so it needs your save.'); drawShed(save); drawCellar(save);
+    const host = document.getElementById('int3d');
+    if (host && save) { const s = save; import('./interiors3d.ts').then(m => { if (document.getElementById('int3d') === host) int3dDispose = m.mountInteriors3D(host, s); }); }
+    return;
+  }
   const seg = `<div class="seg doc-seg" role="tablist">${([['optimized', 'Optimized ★'], ['owned', 'Use what I own']] as const).map(([k, n]) => `<button data-bf="${k}" class="${buildFor === k ? 'on' : ''}">${tr(n)}</button>`).join('')}</div>`;
   const p = plans[buildFor];
   const missing = `<h2>${tr(TABS.find(x => x[0] === tab)![1])}</h2><p>Open the “${tr(buildFor === 'owned' ? 'Use what I own' : 'Optimized ★')}” tab once to generate that plan.</p>`;
-  if (tab === 'build') doc.innerHTML = seg + (p ? buildHTML(save, p) : missing);
+  if (tab === 'build') doc.innerHTML = seg + (!save ? `<h2>Build list</h2>${NEED_SAVE('The build list compares the plan with what you own: backpack, chests and everything on the farm.')}` : p ? buildHTML(save, p) : missing);
   else if (tab === 'moves') doc.innerHTML = seg + (p && plans.current ? movesHTML(plans.current, p, tr(buildFor === 'owned' ? 'Use what I own' : 'Optimized ★')) : missing);
   else if (tab === 'crops') {
     const crops = (q: Plan | null) => q ? q.tiles.filter(x => x === 'C').length : 0;
@@ -153,10 +173,12 @@ function renderDoc() {
       { name: tr(buildFor === 'owned' ? 'Use what I own' : 'Optimized ★'), tiles: crops(p), note: '' },
       { name: tr('Greenhouse'), tiles: crops(plans.greenhouse), note: '' },
       { name: tr('Ginger Island'), tiles: crops(plans.island), note: '' },
-    ], profsOf(save?.professions), { kegs: own('Keg'), jars: own('Preserves Jar'), casks: own('Cask') });
+    ], profsOf(save?.professions), { kegs: own('Keg'), jars: own('Preserves Jar'), casks: save ? myCellar(save)?.casks.length ?? 0 : 0 });
   }
 }
 $('doc').addEventListener('click', e => {
+  const iv = (e.target as HTMLElement).closest<HTMLElement>('[data-iv]');
+  if (iv) { intView = iv.dataset.iv as '2d' | '3d'; store('intView', intView); renderDoc(); return; }
   const b = (e.target as HTMLElement).closest<HTMLElement>('[data-bf]'); if (!b) return;
   buildFor = b.dataset.bf as 'optimized' | 'owned'; store('buildFor', buildFor); renderDoc();
 });
@@ -167,9 +189,21 @@ let dirty = true, rafPending = false, worldFor: Plan | null = null;
 let hover: { x: number; y: number } | null = null, rectDrag: { x0: number; y0: number; x1: number; y1: number } | null = null;
 let v3: View3D | null = null;
 
+// Map-side notes: a slim "blank farm" strip when no save is loaded, a full card when a tab has nothing to show.
+function renderEmpty() {
+  const el = $('emptyNote'), p = plan(), grid = GRID.includes(tab);
+  const ownedEmpty = grid && tab === 'owned' && !p;
+  const strip = grid && !save && !ownedEmpty && tab !== 'island' && tab !== 'greenhouse';
+  el.hidden = !(ownedEmpty || strip); el.className = 'empty-note' + (ownedEmpty ? ' card' : '');
+  if (ownedEmpty) el.innerHTML = `<h3>Use what I own</h3><p>This plan re-lays your farm using only the sprinklers, scarecrows and huts you already have. Load your save, or place your equipment on the Current tab first.</p><p><button class="btn primary" data-act="load">⇪ Load your save</button> <button class="btn" data-act="howto">▶ How to find it</button></p>`;
+  else if (strip) el.innerHTML = `<span>${tab === 'current' ? `Blank ${farmName()} — no save loaded.` : `Best layout for a blank ${farmName()}.`}</span><button class="btn primary" data-act="load">⇪ Load your save</button><button class="btn" data-act="howto">How?</button>`;
+}
+const farmName = () => { const l = FARM_DEFS[farmKey].label; return /farm/i.test(l) ? l : l + ' farm'; };
+const ownsSomething = () => { const b = budget(); return b.I + b.Q + b.S > 0; };
 function changed(fit = false) {
   const p = plan();
   dirty = true;
+  renderEmpty();
   if (p) { A = analyze(p); persist(); if (fit || !cams[farmKey + tab]) fitCam(); }
   renderStats(); renderOverlays(); renderOpt(); render();
   if (view === '3d' && p) show3d(false);
@@ -177,7 +211,7 @@ function changed(fit = false) {
 function render() { if (!rafPending) { rafPending = true; requestAnimationFrame(frame); } }
 function frame() {
   rafPending = false;
-  const p = plan(); if (!p || view !== '2d') return;
+  const p = plan(); if (!p) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height); } if (!p || view !== '2d') return;
   const dpr = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
   if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
   if (dirty || worldFor !== p) {
@@ -211,6 +245,7 @@ function frame() {
   if (animating) render();
 }
 function fitCam() {
+  if (view === '3d' && v3) { v3.fit(); return; }
   const p = plan(); if (!p) return;
   const w = cv.clientWidth || 800, h = cv.clientHeight || 600;
   const z = Math.min(w / (p.w * TILE), h / (p.h * TILE)) * 0.96;
@@ -218,6 +253,7 @@ function fitCam() {
   render();
 }
 function zoomAt(f: number, sx = cv.clientWidth / 2, sy = cv.clientHeight / 2) {
+  if (view === '3d' && v3) { v3.zoom(f); return; }
   const c = cams[farmKey + tab]; if (!c) return;
   const z = Math.max(0.25, Math.min(8, c.z * f));
   const wx = c.x + sx / c.z, wy = c.y + sy / c.z;
@@ -258,7 +294,7 @@ function toggleOv(k: keyof Overlays) {
 }
 
 function renderLegend() {
-  const items = ['C', 'I', 'Q', 'S', 'R', 'r', 'F', 'G', 'P', 'T', 'A', 'U', 'E', 'M', 'H', 'L'];
+  const items = ['C', 'Y', 'I', 'Q', 'S', 'R', 'r', 'F', 'G', 'P', 'T', 'A', 'U', 'E', 'M', 'H', 'L'];
   const terr = ['d', 's', 'g', 'p', '~', 'X'];
   $('legend').innerHTML = items.map(c => `<div><img src="${iconURL(c, 16)}" alt="">${ITEMS[c].name}</div>`).join('') +
     terr.map(t => `<div><i style="background:${TERRAIN_COLOR[t]}"></i>${TERRAIN[t].name.replace(/ \(.*/, '')}</div>`).join('') +
@@ -281,16 +317,16 @@ function renderOpt() {
     $('optRun').onclick = () => runOptimize('owned');
     return;
   }
-  const num = (k: 'tappers' | 'beeHouses', l: string) => `<label>${tr(l)}<input type="number" min="0" max="40" data-o="${k}" value="${optOpts[k]}"></label>`;
+  const num = (k: 'tappers' | 'beeHouses' | 'rods', l: string) => `<label>${tr(l)}<input type="number" min="0" max="60" data-o="${k}" value="${optOpts[k] ?? budget().rods}"></label>`;
   const chk = (k: 'huts' | 'crows' | 'fence' | 'floorAll', l: string) => `<label>${tr(l)}<input type="checkbox" data-o="${k}" ${optOpts[k] ? 'checked' : ''}></label>`;
   box.innerHTML = `<div class="opt">${bed ? '<p class="muted" style="margin:0">Hand-harvest bed: 5×5 iridium lattice, no huts or crows.</p>' :
-    chk('huts', 'Junimo huts') + chk('crows', 'Deluxe scarecrows') + chk('fence', 'Fence ring') + chk('floorAll', 'Floor every open tile (weed-proof)') + num('tappers', 'Tapper trees') + num('beeHouses', 'Bee houses')}
+    chk('huts', 'Junimo huts') + chk('crows', 'Deluxe scarecrows') + chk('fence', 'Fence ring') + chk('floorAll', 'Floor every open tile (weed-proof)') + num('tappers', 'Tapper trees') + num('beeHouses', 'Bee houses') + num('rods', 'Lightning rods')}
     <button class="btn primary" id="optRun">${tr(bed ? 'Re-lay sprinklers' : tab === 'current' ? 'Best possible → Optimized tab' : 'Re-optimize this farm')}</button>
     ${tab === 'current' ? `<button class="btn" id="optOwn">${tr('With what I own → its tab')}</button>` : ''}
     <button class="btn" id="fixGaps">${tr('Fix coverage gaps')}</button><div class="log" id="optLog"></div></div>`;
   box.querySelectorAll<HTMLInputElement>('[data-o]').forEach(i => i.onchange = () => {
     const k = i.dataset.o as keyof OptOptions;
-    (optOpts as Record<string, unknown>)[k] = i.type === 'checkbox' ? i.checked : Math.max(0, Math.min(40, +i.value || 0));
+    (optOpts as Record<string, unknown>)[k] = i.type === 'checkbox' ? i.checked : Math.max(0, Math.min(60, +i.value || 0));
     store('opt', optOpts);
   });
   $('optRun').onclick = () => runOptimize();
@@ -303,10 +339,10 @@ function renderOpt() {
 }
 
 // Owned equipment: from the save when it matches this farm type, else counted off the Current tab.
-function budget(): Budget & { tappers: number; beeHouses: number } {
+function budget(): Budget & { tappers: number; beeHouses: number; rods: number } {
   if (save && farmKeyOf(save) === farmKey) return ownedBudget(save);
   const p = plans.current, n = (c: string) => p ? p.tiles.filter(t => t === c).length : 0;
-  return { I: n('I'), Q: n('Q'), S: n('S'), R: n('R'), r: n('r'), huts: p ? p.buildings.filter(b => b.type === 'junimo').length : 0, tappers: n('A'), beeHouses: n('E') };
+  return { I: n('I'), Q: n('Q'), S: n('S'), R: n('R'), r: n('r'), huts: p ? p.buildings.filter(b => b.type === 'junimo').length : 0, tappers: n('A'), beeHouses: n('E'), rods: n('L') };
 }
 
 let worker: Worker | null = null;
@@ -320,8 +356,8 @@ function runOptimize(mode?: 'optimized' | 'owned') {
     const b = budget();
     base = ownOpts.keepBuildings ? clonePlan(plans.current!) : optimizeBase(plans.current!, 'Use what I own');
     base.title = 'Use what I own';
-    opts = { buildings: ownOpts.keepBuildings ? [] : plans.current!.buildings.filter(x => !x.fixed && x.type !== 'junimo').map(x => x.type), keepBuildings: ownOpts.keepBuildings, tappers: Math.min(12, b.tappers), beeHouses: Math.min(6, b.beeHouses), huts: true, crows: true, fence: ownOpts.fence, floorAll: ownOpts.floorAll, budget: { ...b, huts: ownOpts.keepBuildings ? 0 : b.huts } };
-  } else { base = optimizeBase(plans.current!, 'Optimized farm'); opts = { ...optOpts, buildings: DEFAULT_YARD.filter(b => !(FARM_DEFS[farmKey].fixed ?? []).some(f => f[0].toLowerCase() === b)) }; }
+    opts = { buildings: ownOpts.keepBuildings ? [] : plans.current!.buildings.filter(x => !x.fixed && x.type !== 'junimo').map(x => x.type), keepBuildings: ownOpts.keepBuildings, tappers: Math.min(12, b.tappers), beeHouses: Math.min(6, b.beeHouses), rods: b.rods, huts: true, crows: true, fence: ownOpts.fence, floorAll: ownOpts.floorAll, budget: { ...b, huts: ownOpts.keepBuildings ? 0 : b.huts } };
+  } else { base = optimizeBase(plans.current!, 'Optimized farm'); opts = { ...optOpts, rods: optOpts.rods ?? budget().rods, buildings: DEFAULT_YARD.filter(b => !(FARM_DEFS[farmKey].fixed ?? []).some(f => f[0].toLowerCase() === b)) }; }
   worker?.terminate();
   worker = new OptWorker();
   $('busy').hidden = false; $('busyText').textContent = 'Optimizing… screening 25 sprinkler lattices';
@@ -346,7 +382,7 @@ function canPaint(p: Plan, x: number, y: number, t: string) {
   if (!inb(p, x, y)) return false;
   const i = idx(p, x, y), ter = TERRAIN[p.base[i]];
   if (!ter?.walk || p.base[i] === 'w' || occAt(p, x, y) >= 0) return false;
-  if (t === 'C' && !ter.till) return false;
+  if ((t === 'C' || t === 'Y') && !ter.till) return false;
   if ((t === 'I' || t === 'Q' || t === 'S') && p.base[i] === 's') return false; // Beach sand
   return true;
 }
@@ -493,7 +529,7 @@ function inspect(x: number, y: number) {
 // ---------- keyboard ----------
 const KEYMAP: Record<string, string> = Object.fromEntries(ALL_TOOLS.filter(t => !t.id.startsWith('b:')).map(t => [t.key.toLowerCase(), t.id]));
 addEventListener('keydown', e => {
-  if ((e.target as HTMLElement).closest?.('input,select,textarea')) return;
+  if ((e.target as HTMLElement).closest?.('input,select,textarea,dialog')) return;
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
@@ -505,6 +541,7 @@ addEventListener('keydown', e => {
   if (k === '0') return fitCam();
   if (k === '[') return $('toolsToggle').click();
   if (k === ']') return $('panelToggle').click();
+  if (k === '\\') return $('topToggle').click();
   if (k === 'escape') { tool = 'select'; rectDrag = null; renderTools(); render(); return; }
   if (k === 'w') return toggleOv('water');
   if (k === 'j') return toggleOv('junimo');
@@ -546,6 +583,7 @@ $('viewSeg').addEventListener('click', async e => {
 async function show3d(reset: boolean) {
   const p = plan(); if (!p) return;
   if (!v3) { const { View3D: V } = await import('./render3d.ts'); v3 = new V($('three')); }
+  if (import.meta.env.DEV) (window as unknown as { __v3: unknown }).__v3 = v3; // dev-only hook for profiling
   // ground texture = 2D world + whichever overlays are on
   const w = buildWorld(p, true), g = w.getContext('2d')!;
   if (A) {
@@ -590,37 +628,59 @@ $('exportPng').onclick = () => {
 $('resetTab').onclick = () => {
   if (!GRID.includes(tab) || !confirm('Reset this tab to its default?')) return;
   snap();
-  const embedded = PLANS as Record<string, unknown>;
-  plans[tab as GridKey] = tab === 'current' ? (save && farmKeyOf(save) === farmKey ? currentPlan(save) : defaultPlan(farmKey)) : tab === 'optimized' || tab === 'owned' ? null : unpack(embedded[tab] as Plan);
-  if (tab === 'optimized' || tab === 'owned') runOptimize(tab); else changed(true);
+  const fromSave = !!save && farmKeyOf(save) === farmKey;
+  plans[tab as GridKey] = tab === 'current' ? (fromSave ? currentPlan(save!) : defaultPlan(farmKey))
+    : tab === 'optimized' ? (!fromSave && DEF.farms[farmKey] ? unpack(DEF.farms[farmKey]) : null)
+    : tab === 'owned' ? null : unpack(DEF[tab as 'island' | 'greenhouse']);
+  if (!plans[tab as GridKey] && (tab === 'optimized' || ownsSomething())) runOptimize(tab as 'optimized' | 'owned'); else changed(true);
 };
 $('loadSave').onclick = () => $('saveFile').click();
-$<HTMLInputElement>('saveFile').onchange = async ev => {
-  const f = (ev.target as HTMLInputElement).files?.[0]; if (!f) return;
-  (ev.target as HTMLInputElement).value = '';
+$<HTMLInputElement>('saveFile').onchange = ev => { const i = ev.target as HTMLInputElement; loadSaveFiles(Array.from(i.files ?? [])); i.value = ''; };
+$<HTMLInputElement>('saveDir').onchange = ev => { const i = ev.target as HTMLInputElement; loadSaveFiles(Array.from(i.files ?? [])); i.value = ''; };
+// One file (the main save, .gz or .tar.gz) or a picked folder: a save folder or the whole Saves folder.
+// The main save is the file named exactly like its folder (Farm_123456789); in a Saves folder with
+// several farms, the most recently played one wins.
+function pickMainSave(files: File[]) {
+  if (files.length === 1) return files[0];
+  const main = files.filter(f => { const p = (f.webkitRelativePath || f.name).split('/'); return p.length >= 2 && p.at(-1) === p.at(-2); });
+  return main.sort((a, b) => b.lastModified - a.lastModified)[0] ?? null;
+}
+async function loadSaveFiles(files: File[]) {
+  if (!files.length) return;
   try {
+    const f = pickMainSave(files);
+    if (!f) throw new Error('no save found in that folder. Pick a folder named like Farm_123456789, or the file inside it with the same name.');
+    if (/^SaveGameInfo/i.test(f.name)) throw new Error('that is SaveGameInfo, only a summary. Pick the other file, the one named like its folder (Farm_123456789).');
     if (f.size > 200 * 1024 * 1024) throw new Error('file too large');
     const { xml } = await readSaveFile(f);
     const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    if (doc.querySelector('parsererror')) throw new Error('not valid XML');
+    if (doc.querySelector('parsererror') || !doc.querySelector('SaveGame')) throw new Error('not a Stardew Valley save. Pick the file named like its folder (Farm_123456789), with no extension.');
     const s = parseSave(doc);
-    if (!confirm(`Load ${s.player}'s farm (${FARM_DEFS[farmKeyOf(s)].label}, ${cap(s.season)} ${s.day} Y${s.year}, ${s.money.toLocaleString()}g)?\nThis replaces the Current and Optimized tabs for that farm type. The save file itself is never modified.`)) return;
-    save = s; store('save', s);
+    if (!confirm(`Load ${s.player}'s farm (${FARM_DEFS[farmKeyOf(s)].label}, ${cap(s.season)} ${s.day} Y${s.year}, ${s.money.toLocaleString()}g)?\nThis replaces the plans for that farm type. The save file itself is never modified, and nothing leaves this device.`)) return;
+    save = s; store('save', s); setHouseLevel(s.houseLevel); store('welcomed', true);
     const key = farmKeyOf(s);
     localStorage.removeItem(STORE + ':' + PLAN_KEY + key);
+    welcomeDlg.close(); videoDlg.close();
     loadFarm(key); ($('farmType') as HTMLSelectElement).value = key;
     renderSaveInfo(); setTab('current'); runOptimize();
-    toast('Save loaded — optimizing…');
-  } catch (err) { toast('Could not read save: ' + (err as Error).message, 6000); }
+    toast('Save loaded — optimizing your farm…');
+  } catch (err) { toast('Could not read save: ' + (err as Error).message, 8000); }
+}
+$('forgetSave').onclick = () => {
+  if (!save || !confirm(`Forget ${save.player}'s save and every plan stored in this browser? Your save file on disk is not touched.`)) return;
+  try { for (const k of Object.keys(localStorage)) if (k.startsWith(STORE + ':plans') || k === STORE + ':save') localStorage.removeItem(k); } catch { /* storage unavailable */ }
+  save = null; setHouseLevel(3);
+  loadFarm(farmKey); renderSaveInfo(); setTab('current'); toast('Save forgotten');
 };
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 function renderSaveInfo() {
   $('saveInfo').textContent = save ? `${save.player} · ${cap(save.season)} ${save.day}, Y${save.year} · ${save.money.toLocaleString()}g` : 'No save loaded';
+  $('forgetSave').hidden = !save;
 }
 
 // ---------- farm type ----------
 const sel = $<HTMLSelectElement>('farmType');
-const renderFarmSelect = () => { sel.innerHTML = FARM_KEYS.map(k => `<option value="${k}">${FARM_DEFS[k].label}${k === 'custom' ? '' : ' farm'}${FARM_DEFS[k].approx ? ' (approx.)' : ''}</option>`).join(''); sel.value = farmKey; };
+const renderFarmSelect = () => { sel.innerHTML = FARM_KEYS.map(k => `<option value="${k}">${FARM_DEFS[k].label}${FARM_DEFS[k].approx ? ' (approx.)' : ''}</option>`).join(''); sel.value = farmKey; };
 renderFarmSelect();
 sel.onchange = () => { loadFarm(sel.value); setTab(tab === 'island' || tab === 'greenhouse' ? tab : GRID.includes(tab) ? tab : 'current'); };
 
@@ -639,6 +699,17 @@ let panelOpen = false;
 $('toolsToggle').onclick = () => { layout.tools = !layout.tools; store('layout', layout); applyLayout(); };
 $('panelToggle').onclick = () => { if (narrow()) { panelOpen = !panelOpen; layout.panel = true; } else layout.panel = !layout.panel; store('layout', layout); applyLayout(); };
 $('panelClose').onclick = () => { panelOpen = false; applyLayout(); };
+// collapsible top bar (focus mode): the view bar keeps a ▾ button to bring it back
+let topShown = load<boolean>('topShown') ?? true;
+function applyTop() {
+  document.body.classList.toggle('top-hidden', !topShown);
+  $('topToggle').textContent = topShown ? '▴' : '▾'; $('topToggle').classList.toggle('on', !topShown);
+  setTimeout(fitCam, 30);
+}
+$('topToggle').onclick = () => { topShown = !topShown; store('topShown', topShown); applyTop(); };
+applyTop();
+// mouse wheel scrolls the tab row sideways
+$('tabs').addEventListener('wheel', e => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { $('tabs').scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
 matchMedia('(max-width: 1040px)').addEventListener('change', applyLayout);
 let toastT = 0;
 function toast(msg: string, ms = 2600) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = window.setTimeout(() => t.classList.remove('show'), ms); }
@@ -674,7 +745,31 @@ addEventListener('hashchange', openSharedFromHash);
 
 // ---------- real game graphics ----------
 const artDlg = $<HTMLDialogElement>('artDlg');
-const artStatus = () => { $('artStatus').textContent = artReady() ? `${artCount()} texture sheets loaded from your game files.` : 'No game graphics loaded — using the built-in pixel art.'; };
+const artStatus = () => { $('artStatus').textContent = artReady() ? `${artCount()} texture sheets loaded from your game files.` : 'No game graphics loaded — using the built-in pixel art.'; renderArtFrames(); };
+// per-building frame picker: preview + ◀ ▶, remembered per building
+function renderArtFrames() {
+  const types = loadedBuildingTypes();
+  $('artFramesBox').hidden = !types.length;
+  $('artFrames').innerHTML = types.map(t => {
+    const fr = buildingFrames(t, BUILDINGS[t].w, BUILDINGS[t].h), cur = frameChoice(t) ?? defaultFrame(t, fr);
+    return `<div class="art-frame"><canvas data-fc="${t}" width="96" height="96"></canvas><b>${BUILDINGS[t].name}</b>
+      <div class="nav"><button class="btn" data-fs="${t}" data-d="-1" aria-label="Previous frame">◀</button><span>${fr.length ? cur + 1 : 0} / ${fr.length}</span><button class="btn" data-fs="${t}" data-d="1" aria-label="Next frame">▶</button>${frameChoice(t) !== null ? `<button class="btn" data-fs="${t}" data-d="0" title="Back to automatic">↺</button>` : ''}</div></div>`;
+  }).join('');
+  $('artFrames').querySelectorAll<HTMLCanvasElement>('[data-fc]').forEach(cv2 => {
+    const t = cv2.dataset.fc!, fr = buildingFrames(t, BUILDINGS[t].w, BUILDINGS[t].h), f = fr[frameChoice(t) ?? defaultFrame(t, fr)];
+    if (!f) return;
+    const g2 = cv2.getContext('2d')!, k = Math.min(96 / f.sw, 96 / f.sh); g2.imageSmoothingEnabled = false;
+    g2.drawImage(f.img, f.sx, f.sy, f.sw, f.sh, (96 - f.sw * k) / 2, 96 - f.sh * k, f.sw * k, f.sh * k);
+  });
+}
+$('artFrames').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-fs]'); if (!b) return;
+  const t = b.dataset.fs!, d = Number(b.dataset.d), fr = buildingFrames(t, BUILDINGS[t].w, BUILDINGS[t].h);
+  if (!fr.length) return;
+  if (d === 0) setFrameChoice(t, null);
+  else setFrameChoice(t, ((frameChoice(t) ?? defaultFrame(t, fr)) + d + fr.length) % fr.length);
+  renderArtFrames(); dirty = true; render(); if (view === '3d') show3d(false);
+});
 $('artOpen').onclick = () => { artStatus(); artDlg.showModal(); };
 $('artClose').onclick = () => artDlg.close();
 $('artPick').onclick = () => $('artDir').click();
@@ -686,7 +781,7 @@ $<HTMLInputElement>('artDir').onchange = async ev => {
   const r = await loadFromFiles(files);
   (ev.target as HTMLInputElement).value = '';
   $('artStatus').textContent = r.loaded.length ? `Loaded ${r.loaded.length} sheets: ${r.loaded.join(', ')}.${r.errors.length ? ' Problems: ' + r.errors.slice(0, 3).join(' · ') : ''}` : `Nothing usable found. ${r.errors[0] ?? 'Pick the Content folder (or “Content (unpacked)”).'}`;
-  dirty = true; render(); if (view === '3d') show3d(false);
+  dirty = true; render(); if (view === '3d') show3d(false); renderArtFrames();
 };
 $('artClear').onclick = async () => { await clearArt(); artStatus(); dirty = true; render(); };
 
@@ -703,6 +798,40 @@ $<HTMLInputElement>('tmxFile').onchange = async ev => {
     toast(`Imported ${def.label} (${def.w}×${def.h}). Stamp your buildings, then optimize.`, 5000);
   } catch (err) { toast('Map import failed: ' + (err as Error).message, 6000); }
 };
+
+// ---------- welcome + videos ----------
+const welcomeDlg = $<HTMLDialogElement>('welcomeDlg'), videoDlg = $<HTMLDialogElement>('videoDlg');
+// the single-file build has no media folder next to it: stream the videos from the website instead
+const MEDIA = location.protocol.startsWith('http') ? '/media/' : 'https://stardew.chandanshakya.com.np/media/';
+const VIDEOS = { tutorial: ['How to load your save', 'tutorial'], showcase: ['What the planner does', 'showcase'] } as const;
+function playVideo(k: keyof typeof VIDEOS) {
+  const v = $<HTMLVideoElement>('videoEl'), [title, file] = VIDEOS[k];
+  $('videoTitle').textContent = title;
+  v.poster = MEDIA + file + '.jpg'; v.src = MEDIA + file + '.mp4';
+  videoDlg.querySelectorAll<HTMLElement>('[data-vid]').forEach(b => b.classList.toggle('on', b.dataset.vid === k));
+  if (!videoDlg.open) videoDlg.showModal();
+  v.play().catch(() => { /* autoplay blocked: the controls are there */ });
+}
+videoDlg.addEventListener('close', () => $<HTMLVideoElement>('videoEl').pause());
+$('videoClose').onclick = () => videoDlg.close();
+$('welcomeClose').onclick = () => { store('welcomed', true); welcomeDlg.close(); };
+$('helpOpen').onclick = () => welcomeDlg.showModal();
+$('videosOpen').onclick = () => playVideo('showcase');
+$('welcomeFarm').innerHTML = FARM_KEYS.filter(k => k !== 'custom').map(k => `<option value="${k}">${FARM_DEFS[k].label}</option>`).join('');
+$<HTMLSelectElement>('welcomeFarm').value = FARM_DEFS[farmKey] && farmKey !== 'custom' ? farmKey : 'standard';
+$('welcomeBlank').onclick = () => {
+  const k = $<HTMLSelectElement>('welcomeFarm').value;
+  store('welcomed', true); welcomeDlg.close();
+  loadFarm(k); sel.value = k; setTab('optimized');
+};
+// buttons inside notes, docs and dialogs
+addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest?.<HTMLElement>('[data-act],[data-vid]'); if (!b) return;
+  if (b.dataset.vid) return playVideo(b.dataset.vid as keyof typeof VIDEOS);
+  if (b.dataset.act === 'load') $('saveFile').click();
+  else if (b.dataset.act === 'loaddir') $('saveDir').click();
+  else if (b.dataset.act === 'howto') { if (!welcomeDlg.open) welcomeDlg.showModal(); welcomeDlg.querySelector('#saveWhere')?.scrollIntoView({ block: 'start' }); }
+});
 
 // ---------- about, language ----------
 const aboutDlg = $<HTMLDialogElement>('aboutDlg');
@@ -725,9 +854,13 @@ if (location.protocol.startsWith('http') && 'serviceWorker' in navigator && !loc
 }
 
 // ---------- boot ----------
+setHouseLevel(save?.houseLevel ?? 3);
 loadFarm(farmKey);
 langSel.value = (load<string>('lang') ?? detectLang()) in LANGS ? (load<string>('lang') ?? detectLang()) : 'en';
 applyI18n();
 renderTools(); renderTabs(); renderLegend(); renderSaveInfo(); applyLayout();
-requestAnimationFrame(() => { setTab(GRID.includes(tab) || TABS.some(x => x[0] === tab) ? tab : 'optimized'); openSharedFromHash(); });
+requestAnimationFrame(() => {
+  setTab(GRID.includes(tab) || TABS.some(x => x[0] === tab) ? tab : 'current'); openSharedFromHash();
+  if (!save && !load<boolean>('welcomed') && !location.hash.startsWith('#s=')) welcomeDlg.showModal();
+});
 restoreCache().then(() => { if (artReady()) { dirty = true; render(); } });

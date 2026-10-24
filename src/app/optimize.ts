@@ -22,6 +22,7 @@ export type OptOptions = {
   tappers: number; beeHouses: number;
   huts: boolean; crows: boolean; fence: boolean; floorAll: boolean;
   restarts?: number; seed?: number;
+  rods?: number;          // lightning rods to keep (battery packs) on spare ground
   budget?: Budget;        // cap equipment at what you own
   keepBuildings?: boolean; // optimize around the buildings where they stand
 };
@@ -40,9 +41,10 @@ export function optimizePlan(src: Plan, o: OptOptions, progress?: (s: string) =>
   p.tiles = Array(N).fill('');
   delete p.notes;
   if (!o.keepBuildings) p.buildings = p.buildings.filter(b => b.fixed);
+  p.rules = { ...p.rules, layout: true };
   let nextId = Math.max(0, ...p.buildings.map(b => b.id)) + 1;
 
-  // used[i]: 0 free · 1 building · 2 path (reserved walkway)
+  // used[i]: 0 free · 1 building · 2 path (reserved walkway) · 3 walking route to a map exit
   const used = new Uint8Array(N);
   const T = (i: number) => TERRAIN[p.base[i]] ?? TERRAIN.X;
   const setRect = (x: number, y: number, w: number, h: number, v: number) => {
@@ -56,6 +58,45 @@ export function optimizePlan(src: Plan, o: OptOptions, progress?: (s: string) =>
   const anchor = house ? [house.x + 4, house.y + 5] : [p.w >> 1, p.h >> 1];
   if (house) setRect(house.x - 1, house.y + house.h, house.w + 2, 2, 2); // porch: 2 rows in front of the house stay open
 
+  // Walking routes: shortest path from the porch to every map exit. Crops may sit on a route
+  // (you walk over crops) but nothing solid may, so no building, sprinkler, scarecrow, hut,
+  // bee house, rod or tree ever cuts you off from the bus stop, forest, backwoods or cave.
+  const route = new Uint8Array(N);
+  if (house) {
+    // Dial's algorithm: stepping onto farmland costs 6, onto roads/spare ground 1, so routes follow
+    // existing paths and field edges instead of slicing the crop field.
+    const start = idx(p, house.x + 4, house.y + house.h);
+    const dist = new Int32Array(N).fill(1e9), prev = new Int32Array(N).fill(-1), buckets: number[][] = [[start]];
+    dist[start] = 0;
+    for (let d = 0; d < buckets.length; d++) for (const j of buckets[d] ?? []) {
+      if (dist[j] !== d) continue;
+      const x = j % p.w, y = (j / p.w) | 0;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (!inb(p, x + dx, y + dy)) continue;
+        const k = idx(p, x + dx, y + dy);
+        if (!T(k).walk || used[k] === 1) continue;
+        const nd = d + (T(k).till && !used[k] ? 6 : 1);
+        if (nd < dist[k]) { dist[k] = nd; prev[k] = j; (buckets[nd] ??= []).push(k); }
+      }
+    }
+    // exits: 'w' tiles plus walkable tiles on the map edge (e.g. the path to the Backwoods)
+    const isExit = (i: number) => { const x = i % p.w, y = (i / p.w) | 0; return dist[i] < 1e9 && (p.base[i] === 'w' || ((x === 0 || y === 0 || x === p.w - 1 || y === p.h - 1) && T(i).walk)); };
+    const done = new Uint8Array(N);
+    for (let i = 0; i < N; i++) {
+      if (!isExit(i) || done[i]) continue;
+      const grp = [i]; done[i] = 1;
+      for (let h = 0; h < grp.length; h++) { const x = grp[h] % p.w, y = (grp[h] / p.w) | 0; for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const k = idx(p, x + dx, y + dy); if (inb(p, x + dx, y + dy) && !done[k] && isExit(k)) { done[k] = 1; grp.push(k); } } }
+      const near = grp.reduce((m, k) => (dist[k] < dist[m] ? k : m), grp[0]);
+      for (let k = near; k >= 0; k = prev[k]) { route[k] = 1; if (used[k] === 0 && !T(k).till) used[k] = 3; }
+    }
+    // narrow spots (cliff/water/building close on both sides) can't be stepped around: mark 2
+    for (let i = 0; i < N; i++) if (route[i]) {
+      const x = i % p.w, y = (i / p.w) | 0; let open = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if ((dx || dy) && inb(p, x + dx, y + dy) && T(idx(p, x + dx, y + dy)).walk && used[idx(p, x + dx, y + dy)] !== 1) open++;
+      if (open <= 5) route[i] = 2;
+    }
+  }
+
   // ---------- 1. yard packer ----------
   const order = [...o.buildings].sort((a, b) => BUILDINGS[b].w * BUILDINGS[b].h - BUILDINGS[a].w * BUILDINGS[a].h);
   for (const type of order) {
@@ -65,7 +106,7 @@ export function optimizePlan(src: Plan, o: OptOptions, progress?: (s: string) =>
       let ok = true, till = 0;
       for (let yy = y; yy < y + d.h && ok; yy++) for (let xx = x; xx < x + d.w; xx++) {
         const i = idx(p, xx, yy);
-        if (used[i] || !T(i).build) { ok = false; break; }
+        if (used[i] || route[i] || !T(i).build) { ok = false; break; }
         if (T(i).till) till++;
       }
       if (!ok) continue;
@@ -99,12 +140,12 @@ export function optimizePlan(src: Plan, o: OptOptions, progress?: (s: string) =>
   }
   progress?.('yard placed');
 
-  // ---------- 2. tapper avenue + bee houses (cheapest straight runs) ----------
+  // ---------- 2. tapper avenue + lightning rods (cheapest straight runs, off walkways) ----------
   const run = (len: number) => {
     let best: { x: number; y: number; c: number } | null = null;
     for (let y = 1; y < p.h - 1; y++) for (let x = 1; x + len < p.w - 1; x++) {
       let c = 0, ok = true;
-      for (let k = 0; k < len; k++) { const i = idx(p, x + k, y); if (used[i] || !T(i).build) { ok = false; break; } c += T(i).till ? 10 : 0; }
+      for (let k = 0; k < len; k++) { const i = idx(p, x + k, y); if (used[i] || route[i] || !T(i).build) { ok = false; break; } c += T(i).till ? 10 : 0; }
       if (!ok) continue;
       c += (Math.abs(x + len / 2 - anchor[0]) + Math.abs(y - anchor[1])) * 0.5;
       if (!best || c < best.c) best = { x, y, c };
@@ -116,14 +157,21 @@ export function optimizePlan(src: Plan, o: OptOptions, progress?: (s: string) =>
     if (r) for (let k = 0; k < o.tappers * 2 - 1; k++) { const i = idx(p, r.x + k, r.y); used[i] = 2; p.tiles[i] = k % 2 ? 'P' : 'A'; }
     else log.push('⚠ no straight run for the tapper avenue');
   }
-  if (o.beeHouses > 0) {
-    const r = run(o.beeHouses);
-    if (r) for (let k = 0; k < o.beeHouses; k++) { const i = idx(p, r.x + k, r.y); used[i] = 2; p.tiles[i] = 'E'; }
+  // Rods: position is irrelevant to the game (a strike picks any empty rod), so they go where they
+  // cost the least: straight runs of spare ground, never crops or walkways ('p' tiles aren't buildable).
+  let rodsLeft = o.rods ?? 0;
+  for (let len = Math.min(rodsLeft, 12); rodsLeft > 0 && len > 0;) {
+    const n = Math.min(len, rodsLeft), r = run(n);
+    if (!r) { len--; continue; }
+    for (let k = 0; k < n; k++) { const i = idx(p, r.x + k, r.y); used[i] = 2; p.tiles[i] = 'L'; }
+    rodsLeft -= n;
   }
+  if (rodsLeft) log.push(`⚠ only ${(o.rods ?? 0) - rodsLeft} of ${o.rods} lightning rods fit`);
 
   // ---------- 3. field ----------
   const field = new Uint8Array(N);
-  for (let i = 0; i < N; i++) if (!used[i] && T(i).till && !p.tiles[i]) field[i] = 1;
+  // 1 = crop or equipment · 2 = narrow spot on a walking route: crop only
+  for (let i = 0; i < N; i++) if (!used[i] && T(i).till && !p.tiles[i]) field[i] = route[i] === 2 ? 2 : 1;
   let fb: FieldResult;
   if (o.budget) {
     let best: FieldResult | null = null;
@@ -134,6 +182,8 @@ export function optimizePlan(src: Plan, o: OptOptions, progress?: (s: string) =>
     fb = best!;
   } else fb = solveField(p, field, used, o, log);
   progress?.('field solved');
+  // hut footprints are buildings from here on (a hut may stand on spare ground outside the field)
+  for (const h of fb.huts) for (let y = h.y; y < h.y + h.h; y++) for (let x = h.x; x < h.x + h.w; x++) used[idx(p, x, y)] = 1;
   if (o.crows && o.budget) {
     // deluxe first (bigger radius), then regular scarecrows on what is still exposed
     let left = placeCrows(p, fb.tiles, field, used, o, 'R', o.budget.R);
@@ -149,12 +199,35 @@ export function optimizePlan(src: Plan, o: OptOptions, progress?: (s: string) =>
   for (let i = 0; i < N; i++) if (fb.tiles[i]) p.tiles[i] = fb.tiles[i];
   for (const h of fb.huts) p.buildings.push({ ...h, id: nextId++ });
 
+  // ---------- 3b. bee houses around one flower ----------
+  // Pick the crop tile with the most spare ground within 5 tiles, make it the flower (watered and
+  // protected like any crop), and put the bee houses on spare ground around it; crop tiles only
+  // if there is no spare ground left.
+  if (o.beeHouses > 0) {
+    const hutAt = new Uint8Array(N);
+    for (const b of p.buildings) for (let y = b.y; y < b.y + b.h; y++) for (let x = b.x; x < b.x + b.w; x++) if (inb(p, x, y)) hutAt[idx(p, x, y)] = 1;
+    const spare = (i: number) => !p.tiles[i] && !hutAt[i] && !used[i] && !route[i] && T(i).build && p.base[i] !== 'p';
+    const within = (f: number, test: (i: number) => boolean) => {
+      const fx = f % p.w, fy = (f / p.w) | 0, out: number[] = [];
+      for (let dy = -5; dy <= 5; dy++) for (let dx = -5; dx <= 5; dx++) if ((dx || dy) && Math.abs(dx) + Math.abs(dy) <= 5 && inb(p, fx + dx, fy + dy) && test(idx(p, fx + dx, fy + dy))) out.push(idx(p, fx + dx, fy + dy));
+      return out.sort((a, b) => Math.abs(a % p.w - fx) + Math.abs(((a / p.w) | 0) - fy) - Math.abs(b % p.w - fx) - Math.abs(((b / p.w) | 0) - fy));
+    };
+    let bestF = -1, bestN = -1;
+    for (let i = 0; i < N; i++) if (p.tiles[i] === 'C') { const n = Math.min(o.beeHouses, within(i, spare).length); if (n > bestN) { bestN = n; bestF = i; if (n >= o.beeHouses) break; } }
+    if (bestF >= 0) {
+      p.tiles[bestF] = 'Y';
+      const spots = [...within(bestF, spare), ...within(bestF, i => p.tiles[i] === 'C' && !route[i])].slice(0, o.beeHouses);
+      for (const i of spots) { p.tiles[i] = 'E'; used[i] = 2; }
+      log.push(`${spots.length} bee houses around a flower at (${bestF % p.w}, ${(bestF / p.w) | 0})`);
+    } else log.push('⚠ no crop tile to host the bee-house flower');
+  }
+
   // ---------- 4. finishing ----------
   const hutOcc = new Uint8Array(N);
   for (const b of p.buildings) for (let y = b.y; y < b.y + b.h; y++) for (let x = b.x; x < b.x + b.w; x++) if (inb(p, x, y)) hutOcc[idx(p, x, y)] = 1;
-  const inField = (i: number) => field[i] && (p.tiles[i] === 'C' || p.tiles[i] === 'I' || p.tiles[i] === 'Q' || p.tiles[i] === 'R' || hutOcc[i]);
+  const inField = (i: number) => field[i] && (p.tiles[i] === 'C' || p.tiles[i] === 'Y' || p.tiles[i] === 'I' || p.tiles[i] === 'Q' || p.tiles[i] === 'R' || hutOcc[i]);
   if (o.fence) for (let i = 0; i < N; i++) {
-    if (inField(i) || hutOcc[i] || p.tiles[i] || !T(i).walk || used[i] === 2 || p.base[i] === 'w') continue;
+    if (inField(i) || hutOcc[i] || p.tiles[i] || !T(i).walk || used[i] >= 2 || route[i] || p.base[i] === 'w') continue;
     const x = i % p.w, y = (i / p.w) | 0;
     let near = false;
     for (let dy = -1; dy <= 1 && !near; dy++) for (let dx = -1; dx <= 1; dx++) if (inb(p, x + dx, y + dy) && inField(idx(p, x + dx, y + dy))) { near = true; break; }
@@ -179,7 +252,7 @@ const wetFrom = (p: Plan, tiles: string[]) => {
 // Greedy patch: add the iridium/quality sprinkler with the best net gain until nothing gains >= 2 tiles.
 function patch(p: Plan, field: Uint8Array, tiles: string[], wet: Uint8Array) {
   const W = p.w, N = W * p.h;
-  const canSpr = (i: number) => field[i] && p.base[i] !== 's';
+  const canSpr = (i: number) => field[i] === 1 && p.base[i] !== 's';
   for (; ;) {
     let bi = -1, br = 0, bg = 1;
     const near = new Uint8Array(N);
@@ -211,7 +284,7 @@ function patch(p: Plan, field: Uint8Array, tiles: string[], wet: Uint8Array) {
 // One sprinkler layout for a lattice phase: iridium lattice + greedy patch.
 function sprinklerLayout(p: Plan, field: Uint8Array, ox: number, oy: number) {
   const W = p.w, H = p.h, tiles: string[] = Array(W * H).fill('');
-  for (let y = oy; y < H; y += 5) for (let x = ox; x < W; x += 5) { const i = y * W + x; if (field[i] && p.base[i] !== 's') tiles[i] = 'I'; }
+  for (let y = oy; y < H; y += 5) for (let x = ox; x < W; x += 5) { const i = y * W + x; if (field[i] === 1 && p.base[i] !== 's') tiles[i] = 'I'; }
   patch(p, field, tiles, wetFrom(p, tiles));
   return tiles;
 }
@@ -247,8 +320,8 @@ function solveField(p: Plan, field: Uint8Array, used: Uint8Array, o: OptOptions,
   if (o.huts) {
     // free tiles a hut may also stand on (costs no crop): dry leftovers and spare open ground
     const free = new Uint8Array(N);
-    for (let i = 0; i < N; i++) if (!tiles[i] && TERRAIN[p.base[i]]?.build && !p.tiles[i] && (field[i] || used[i] === 0)) free[i] = 1;
-    huts = placeHuts(p, tiles, o, free);
+    for (let i = 0; i < N; i++) if (!tiles[i] && TERRAIN[p.base[i]]?.build && !p.tiles[i] && (field[i] === 1 || used[i] === 0)) free[i] = 1;
+    huts = placeHuts(p, tiles, o, free, field);
     for (const h of huts) for (let y = h.y; y < h.y + 2; y++) for (let x = h.x; x < h.x + 3; x++) tiles[y * W + x] = '';
     let dropped = 0;
     for (let i = 0; i < N; i++) if (tiles[i] === 'C') {
@@ -267,7 +340,7 @@ function solveBudget(p: Plan, field: Uint8Array, ox: number, oy: number, o: OptO
   const W = p.w, H = p.h, N = W * H;
   const tiles: string[] = Array(N).fill('');
   const wet = new Uint8Array(N);
-  const canSpr = (i: number) => field[i] && p.base[i] !== 's' && !tiles[i];
+  const canSpr = (i: number) => field[i] === 1 && p.base[i] !== 's' && !tiles[i];
   const dist = (i: number) => Math.hypot((i % W) - anchor[0], ((i / W) | 0) - anchor[1]);
   const offs = (code: string): [number, number][] => code === 'S' ? [[1, 0], [-1, 0], [0, 1], [0, -1]] : [...Array(code === 'I' ? 25 : 9)].map((_, k) => { const r = code === 'I' ? 2 : 1, n = 2 * r + 1; return [(k % n) - r, ((k / n) | 0) - r] as [number, number]; }).filter(([dx, dy]) => dx || dy);
   const gain = (i: number, code: string) => {
@@ -299,7 +372,7 @@ function solveBudget(p: Plan, field: Uint8Array, ox: number, oy: number, o: OptO
   for (let i = 0; i < N; i++) if (field[i] && !tiles[i] && wet[i]) tiles[i] = 'C';
   let huts: PB[] = [], hand = 0;
   if (o.huts && b.huts > 0) {
-    huts = placeHuts(p, tiles, o).slice(0, b.huts);
+    huts = placeHuts(p, tiles, o, undefined, field).slice(0, b.huts);
     for (const h of huts) for (let y = h.y; y < h.y + 2; y++) for (let x = h.x; x < h.x + 3; x++) tiles[y * W + x] = '';
     for (let i = 0; i < N; i++) if (tiles[i] === 'C' && !huts.some(h => Math.abs((i % W) - h.x - 1) <= JUNIMO_R && Math.abs(((i / W) | 0) - h.y - 1) <= JUNIMO_R)) hand++;
   }
@@ -308,13 +381,13 @@ function solveBudget(p: Plan, field: Uint8Array, ox: number, oy: number, o: OptO
 }
 
 // Junimo huts: randomized greedy set cover on a summed-area table, then prune redundant huts.
-function placeHuts(p: Plan, tiles: string[], o: OptOptions, free?: Uint8Array): PB[] {
+function placeHuts(p: Plan, tiles: string[], o: OptOptions, free?: Uint8Array, field?: Uint8Array): PB[] {
   const W = p.w, H = p.h, R = JUNIMO_R;
   const fits = (x: number, y: number) => {
     if (x < 0 || y < 0 || x + 3 > W || y + 2 > H) return false;
     for (let yy = y; yy < y + 2; yy++) for (let xx = x; xx < x + 3; xx++) {
       const i = yy * W + xx;
-      if (!TERRAIN[p.base[i]]?.build) return false; // a hut is a building
+      if (!TERRAIN[p.base[i]]?.build || field?.[i] === 2) return false; // a hut is a building; never on a walking route
       if (tiles[i] !== 'C' && !free?.[i]) return false;
     }
     return true;
@@ -418,9 +491,9 @@ function placeCrows(p: Plan, tiles: string[], field: Uint8Array, used: Uint8Arra
   if (!crops.length || limit <= 0) return crops;
   const cands: number[] = [];
   for (let i = 0; i < N; i++) {
-    if (tiles[i] === 'C') cands.push(i);
+    if (tiles[i] === 'C' && field[i] !== 2) cands.push(i);
     // spare open ground only: never roads/porches ('p' walk-only tiles) or map exits, so walkways stay clear
-    else if (!tiles[i] && !p.tiles[i] && !field[i] && used[i] !== 1 && TERRAIN[p.base[i]]?.build) cands.push(i);
+    else if (!tiles[i] && !p.tiles[i] && !field[i] && used[i] !== 1 && used[i] !== 3 && TERRAIN[p.base[i]]?.build) cands.push(i);
   }
   const rand = rng((o.seed ?? 1) * 7);
   let best: number[] | null = null, bestCost = 1e9;

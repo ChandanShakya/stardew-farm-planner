@@ -7,12 +7,12 @@ import { DEFAULT_YARD, optimizePlan, optimizeBed } from '../src/app/optimize.ts'
 import type { SaveData } from '../src/app/save.ts';
 
 const t0 = performance.now();
-const cur = currentPlan(save as SaveData);
-const { plan, log } = optimizePlan(optimizeBase(cur), { buildings: DEFAULT_YARD, tappers: 12, beeHouses: 6, huts: true, crows: true, fence: true, floorAll: true });
+const cur = currentPlan(save as unknown as SaveData);
+const { plan, log } = optimizePlan(optimizeBase(cur), { buildings: DEFAULT_YARD, tappers: 12, beeHouses: 6, rods: ownedBudget(save as unknown as SaveData).rods, huts: true, crows: true, fence: true, floorAll: true });
 // "Use what I own": same farm, current buildings where they stand, equipment capped at what you own.
 import { ownedBudget } from '../src/app/buildlist.ts';
-const ob = ownedBudget(save as SaveData);
-const owned = optimizePlan(cur, { buildings: [], keepBuildings: true, tappers: Math.min(12, ob.tappers), beeHouses: Math.min(6, ob.beeHouses), huts: true, crows: true, fence: false, floorAll: true, budget: ob });
+const ob = ownedBudget(save as unknown as SaveData);
+const owned = optimizePlan(cur, { buildings: [], keepBuildings: true, tappers: Math.min(12, ob.tappers), beeHouses: Math.min(6, ob.beeHouses), rods: ob.rods, huts: true, crows: true, fence: false, floorAll: true, budget: ob });
 owned.plan.title = 'Use what I own';
 const island = optimizeBed(blankPlan('island', 'Ginger Island farm', FARM_DEFS.island, { crows: false, junimo: false }));
 const gh = optimizeBed(greenhouse());
@@ -34,7 +34,7 @@ console.log(log.join('\n'), `\n${((performance.now() - t0) / 1000).toFixed(1)}s`
 if (a.problems) process.exit(1);
 
 import { buildList } from '../src/app/buildlist.ts';
-const bl = buildList(save as SaveData, plan, 10);
+const bl = buildList(save as unknown as SaveData, plan, 10);
 for (const r of [...bl.rows, ...bl.endgame]) console.log(`${r.item.padEnd(28)} need ${String(r.need).padStart(5)} have ${String(r.have).padStart(5)} missing ${String(r.missing).padStart(5)} gold ${r.gold.toLocaleString().padStart(11)} ${r.hard?.join(', ') ?? ''}`);
 for (const m of bl.materials) console.log(`  ${m.name.padEnd(26)} need ${m.need} have ${m.have} ${m.note ?? ''}`);
 console.log(`Build phase ${bl.gold.toLocaleString()}g vs ${bl.money.toLocaleString()}g on hand · endgame ${bl.endGold.toLocaleString()}g`);

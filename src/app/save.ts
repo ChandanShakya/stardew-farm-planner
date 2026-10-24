@@ -21,6 +21,9 @@ export type SaveData = {
   placedBy: Record<string, Record<string, number>>; // location -> name -> count
   rarecrows: string[];        // distinct rarecrow item ids owned (placed or stored)
   chests: { loc: string; x: number; y: number; name: string; slots: number }[];
+  // Cellar = the farmhouse cellar; Cellar2..8 belong to farmhand cabins in co-op. `owner`:
+  // 'you' (assigned to this player), 'farmhand' (assigned to someone else) or 'unassigned'.
+  cellars: { name: string; owner: 'you' | 'farmhand' | 'unassigned'; casks: [number, number, boolean][] }[];
 };
 
 // Item ids of the 8 Rarecrows (big craftables) — owning all 8 unlocks the Deluxe Scarecrow recipe.
@@ -112,6 +115,9 @@ export function parseSave(doc: Document): SaveData {
   const placedAll: Record<string, number> = {};
   const placedBy: SaveData['placedBy'] = {};
   const chests: SaveData['chests'] = [];
+  const myId = txt(player, 'UniqueMultiplayerID');
+  const assigned = new Map(kids(kid(root, 'cellarAssignments'), 'item').map(it => [Number(txt(it, 'key/int')), txt(it, 'value/long')]));
+  const cellars: SaveData['cellars'] = [];
   for (const { name, el, own } of all) {
     if (!own) continue;
     const fr = kid(el, 'fridge');
@@ -130,6 +136,12 @@ export function parseSave(doc: Document): SaveData {
       const held = kid(v, 'heldObject');             // auto-grabber / machine storage chests
       if (held && held.getAttribute(XSI) === 'Chest') addItems(kid(held, 'items'), name + ' ' + on);
     }
+    const cm = name.match(/^Cellar(\d*)$/);
+    if (cm) {
+      const n = Number(cm[1] || 1), who = assigned.get(n);
+      cellars.push({ name, owner: who === undefined ? 'unassigned' : who === myId ? 'you' : 'farmhand',
+        casks: objOf(el).filter(o => o.v && txt(o.v, 'name') === 'Cask').map(o => [num(o.k, 'X'), num(o.k, 'Y'), !!kid(o.v, 'heldObject')] as [number, number, boolean]) });
+    }
     for (const b of kids(kid(el, 'buildings'), 'Building'))
       for (const c of kids(kid(b, 'buildingChests'), 'Chest')) addItems(kid(c, 'items'), txt(b, 'buildingType') + ' ' + txt(c, 'Name'));
   }
@@ -141,7 +153,7 @@ export function parseSave(doc: Document): SaveData {
     gameVersion: txt(root, 'gameVersion'), walnuts: num(root, 'goldenWalnutsFound'), qiGems: num(player, 'qiGems'),
     recipes: kids(kid(player, 'craftingRecipes'), 'item').map(i => txt(i, 'key/string')),
     professions: kids(kid(player, 'professions'), 'int').map(e => Number(e.textContent)),
-    buildings, objects, features, inventory, placedAll, placedBy, rarecrows: [...rare].sort(), chests,
+    buildings, objects, features, inventory, placedAll, placedBy, rarecrows: [...rare].sort(), chests, cellars,
   };
 }
 

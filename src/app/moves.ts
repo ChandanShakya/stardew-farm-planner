@@ -67,11 +67,13 @@ export function movesHTML(cur: Plan, tgt: Plan, label: string) {
   ${step(1, 'Empty and pick up', `<p class="muted">Empty chests into the house chest wall first (House &amp; chests tab).</p><ul>${list(pick)}</ul><p>${harvest ? `Harvest or clear <b>${f(harvest)}</b> crops. ` : ''}${chop ? `Chop <b>${f(chop)}</b> trees in the way. ` : ''}${unfloor ? `Lift <b>${f(unfloor)}</b> flooring tiles.` : ''}</p>`)}
   ${step(2, 'Robin: move buildings (free)', moves.length ? `<ul>${moves.map(m => `<li>${esc(BUILDINGS[m.to.type].name)}: ${at(m.from)} → <b>${at(m.to)}</b></li>`).join('')}</ul>` : '<p class="muted">No buildings move.</p>')}
   ${step(3, 'Build', build.filter(b => b.type !== 'junimo').length || huts.length ? `<ul>${build.filter(b => b.type !== 'junimo').map(b => `<li>${esc(BUILDINGS[b.type].name)} at <b>${at(b)}</b></li>`).join('')}${build.some(b => b.type === 'junimo') ? `<li>${build.filter(b => b.type === 'junimo').length} Junimo Huts (Wizard) at ${build.filter(b => b.type === 'junimo').map(at).join(' ')}</li>` : ''}</ul>${extra.length ? `<p class="muted">Not in the plan (demolish or keep elsewhere): ${extra.map(b => esc(b.label ?? BUILDINGS[b.type].name) + ' ' + at(b)).join(', ')}</p>` : ''}` : '<p class="muted">Nothing new to build.</p>')}
-  ${step(4, 'Place equipment', `<ul>${list(place)}</ul><p>Then hoe and plant <b>${f(plantCrops)}</b> crop tiles.</p>`)}
+  ${step(4, 'Place equipment', `<ul>${list(place)}</ul><p>Then hoe and plant <b>${f(plantCrops)}</b> crop tiles${tgt.tiles.includes('Y') ? ', and plant a flower (Fairy Rose is best) on the bee-house flower tile' : ''}.</p>`)}
   </div>
   <h3>Exact positions</h3>
   <details open><summary><b>Iridium Sprinklers</b></summary>${coords('I')}</details>
   <details><summary><b>Quality Sprinklers</b></summary>${coords('Q')}</details>
   <details><summary><b>Scarecrows</b></summary>${coords('R')}${coords('r')}</details>
+  <details><summary><b>Lightning Rods</b></summary>${coords('L')}</details>
+  <details><summary><b>Bee houses + flower</b></summary>${coords('E')}<p>Flower tile: ${(() => { const ys: string[] = []; for (let i = 0; i < N; i++) if (tgt.tiles[i] === 'Y') ys.push(`(${i % W}, ${(i / W) | 0})`); return ys.join(' ') || 'none'; })()}</p></details>
   <details><summary><b>Junimo Huts</b></summary><p>${huts.map(at).join(' · ') || 'none'}</p></details>`;
 }

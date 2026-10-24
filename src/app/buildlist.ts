@@ -34,6 +34,7 @@ const CRAFT: Record<string, Mat[]> = {
   P: [['Stone', 1]],
   E: [['Wood', 40], ['Coal', 8], ['Iron Bar', 1], ['Maple Syrup', 1]],
   A: [['Wood', 40], ['Copper Bar', 2]],
+  L: [['Iron Bar', 1], ['Refined Quartz', 1], ['Bat Wing', 5]],
   BigChest: [['Wood', 120], ['Copper Bar', 2]],
 };
 const HARD = new Set(['Iridium Bar', 'Iridium Ore', 'Battery Pack', 'Starfruit', 'Dragon Tooth', 'Banana', 'Cactus Fruit', 'Refined Quartz']);
@@ -48,7 +49,7 @@ export function ownedBudget(s: SaveData) {
     I: own('Iridium Sprinkler'), Q: own('Quality Sprinkler'), S: own('Sprinkler'),
     R: own('Deluxe Scarecrow'), r: own('Scarecrow') + own('Rarecrow'),
     huts: s.buildings.filter(b => b.type === 'Junimo Hut').length,
-    tappers: own('Tapper') + own('Heavy Tapper'), beeHouses: own('Bee House'),
+    tappers: own('Tapper') + own('Heavy Tapper'), beeHouses: own('Bee House'), rods: own('Lightning Rod'),
   };
 }
 
@@ -75,6 +76,8 @@ export function buildList(s: SaveData, plan: Plan, bigChests: number): BuildList
   rows.push(mk('Stone Floor', a.counts.P ?? 0, own('Stone Floor'), CRAFT.P, 0, { note: 'Weed-proofing: debris cannot spawn on flooring' }));
   rows.push(mk('Tapper', a.counts.A ?? 0, own('Tapper') + own('Heavy Tapper'), CRAFT.A, 0, { note: `Tree seeds on hand: ${inv('Maple Seed')} maple · ${inv('Acorn')} acorn · ${inv('Pine Cone')} pine cone` }));
   rows.push(mk('Bee House', a.counts.E ?? 0, own('Bee House'), CRAFT.E));
+  rows.push(mk('Fairy Seeds (bee-house flower)', a.counts.Y ?? 0, inv('Fairy Seeds'), [], 200, { note: 'Pierre, fall, 200g. Any flower works; Fairy Rose makes the most valuable honey.' }));
+  rows.push(mk('Lightning Rod', a.counts.L ?? 0, own('Lightning Rod'), CRAFT.L, 0, { note: 'Each strike in a storm charges an empty rod → 1 Battery Pack (Iridium Sprinklers need one each)' }));
   rows.push(mk('Big Chest (house storage)', bigChests, own('Big Chest') + inv('Big Chest'), CRAFT.BigChest, 0, { note: s.recipes.includes('Big Chest') ? 'Recipe known' : 'Recipe from Robin' }));
   // buildings
   const have: Record<string, number> = {};

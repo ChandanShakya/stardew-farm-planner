@@ -22,29 +22,37 @@ export function buildWorld(p: Plan, ground3d = false): HTMLCanvasElement {
     g.drawImage(terrainTile(p.base[i], v) as CanvasImageSource, X, Y);
     const t = p.tiles[i];
     if (!t) continue;
-    if (ground3d && t !== 'P') { if (t === 'C' || t === 'D') g.drawImage(hoeTile() as CanvasImageSource, X, Y); continue; }
+    if (ground3d && t !== 'P') {
+      if (t === 'C' || t === 'D' || t === 'Y') { const s = real ? hoeSrc() : null; s ? blit(s, X, Y) : g.drawImage(hoeTile() as CanvasImageSource, X, Y); }
+      continue;
+    }
     if (real) {
       if (t === 'P') { const s = floorSrc(); s ? blit(s, X, Y) : g.drawImage(floorTile(v) as CanvasImageSource, X, Y); continue; }
-      if (t === 'C' || t === 'D') { const s = hoeSrc(); s ? blit(s, X, Y) : g.drawImage(hoeTile() as CanvasImageSource, X, Y); }
+      if (t === 'C' || t === 'D' || t === 'Y') { const s = hoeSrc(); s ? blit(s, X, Y) : g.drawImage(hoeTile() as CanvasImageSource, X, Y); }
       if (t === 'D') continue;
       if (t === 'T' || t === 'A') { const s = treeSrc(); if (s) { tall.push({ y, draw: () => { blit(s, X - 16, Y - 80); if (t === 'A') { const tp = itemSrc('A'); if (tp) blit(tp, X, Y - 16); } } }); continue; } }
       if (t === 'F') { const s = fenceSrc(); if (s) { tall.push({ y, draw: () => blit(s, X, Y - 16) }); continue; } }
       const s = itemSrc(t, p.notes?.[i]);
       if (s) {
-        if (t === 'C') blit(s, X + 2, Y + 1, 12, 12);
+        if (t === 'C' || t === 'Y') blit(s, X + 2, Y + 1, 12, 12);
         else if (s.sh > 16) tall.push({ y, draw: () => blit(s, X, Y - 16) });
         else blit(s, X, Y);
         continue;
       }
     }
     if (t === 'P') { g.drawImage(floorTile(v) as CanvasImageSource, X, Y); continue; }
-    if (t === 'C' || t === 'D') g.drawImage(hoeTile() as CanvasImageSource, X, Y);
+    if (t === 'C' || t === 'D' || t === 'Y') g.drawImage(hoeTile() as CanvasImageSource, X, Y);
     if (t !== 'D') g.drawImage(sprite(t) as CanvasImageSource, X, Y);
   }
   if (ground3d) return c;
   for (const b of p.buildings) {
-    const s = real ? buildingSrc(b.type, b.w) : null;
-    if (s) tall.push({ y: b.y + b.h - 1, draw: () => { g.fillStyle = 'rgba(0,0,0,.25)'; g.fillRect(b.x * TILE + 3, b.y * TILE + 4, b.w * TILE, b.h * TILE); blit(s, b.x * TILE + (b.w * TILE - s.sw) / 2, (b.y + b.h) * TILE - s.sh); } });
+    const s = real ? buildingSrc(b.type, b.w, b.h) : null;
+    if (s) tall.push({ y: b.y + b.h - 1, draw: () => {
+      // scale the trimmed frame to the footprint width and stand it on the footprint's bottom edge
+      const dw = b.w * TILE, dh = Math.round(s.sh * dw / s.sw);
+      g.fillStyle = 'rgba(0,0,0,.25)'; g.fillRect(b.x * TILE + 3, b.y * TILE + 4, b.w * TILE, b.h * TILE);
+      blit(s, b.x * TILE, (b.y + b.h) * TILE - dh, dw, dh);
+    } });
     else tall.push({ y: b.y + b.h - 1, draw: () => drawBuilding(g, b) });
   }
   tall.sort((a, b) => a.y - b.y).forEach(d => d.draw());
@@ -135,7 +143,7 @@ export function drawView(ctx: CanvasRenderingContext2D, cv: HTMLCanvasElement, d
   over: HTMLCanvasElement | OvDraw[] | null, cam: Cam, ov: Overlays, hover: { x: number; y: number; w: number; h: number; ok: boolean } | null,
   rect: { x0: number; y0: number; x1: number; y1: number } | null, accent: string) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = '#0f1412'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = '#1d2b16'; ctx.fillRect(0, 0, cv.width, cv.height);
   const s = cam.z * dpr;
   ctx.setTransform(s, 0, 0, s, -cam.x * s, -cam.y * s);
   ctx.imageSmoothingEnabled = false;
@@ -163,7 +171,7 @@ export function drawView(ctx: CanvasRenderingContext2D, cv: HTMLCanvasElement, d
   }
   if (hover) {
     ctx.strokeStyle = hover.ok ? accent : '#ef4444'; ctx.lineWidth = 2 / s;
-    ctx.fillStyle = hover.ok ? 'rgba(74,222,128,.15)' : 'rgba(239,68,68,.2)';
+    ctx.fillStyle = hover.ok ? 'rgba(243,195,75,.22)' : 'rgba(239,68,68,.25)';
     ctx.fillRect(hover.x * TILE, hover.y * TILE, hover.w * TILE, hover.h * TILE);
     ctx.strokeRect(hover.x * TILE, hover.y * TILE, hover.w * TILE, hover.h * TILE);
   }
@@ -179,7 +187,7 @@ export function drawView(ctx: CanvasRenderingContext2D, cv: HTMLCanvasElement, d
       if (z * b.w < 26) { if (b.type === 'junimo') hutN++; continue; }
       const full = b.type === 'junimo' ? 'H' + ++hutN : (b.label && b.label !== d.name && !b.label.startsWith('Starting') ? b.label : d.name);
       const fs = Math.max(9, Math.min(13, z * 0.5));
-      ctx.font = `600 ${fs}px Inter, system-ui, sans-serif`;
+      ctx.font = `600 ${fs}px 'Pixelify Sans', monospace`;
       // too wide for the footprint? fall back to the short name (Earth Obelisk -> Earth)
       const name = ctx.measureText(full).width > z * b.w * 1.15 ? SHORT[b.type] ?? full.split(' ')[0] : full;
       const cx = (b.x + b.w / 2) * z - cam.x * cam.z, cy = (b.y + b.h / 2) * z - cam.y * cam.z;
@@ -187,8 +195,12 @@ export function drawView(ctx: CanvasRenderingContext2D, cv: HTMLCanvasElement, d
       const r: [number, number, number, number] = [cx - tw / 2, cy - th / 2, tw, th];
       if (placed.some(q => r[0] < q[0] + q[2] && q[0] < r[0] + r[2] && r[1] < q[1] + q[3] && q[1] < r[1] + r[3])) continue;
       placed.push(r);
-      ctx.fillStyle = 'rgba(10,14,12,.78)'; ctx.beginPath(); ctx.roundRect(r[0], r[1], tw, th, 5); ctx.fill();
-      ctx.fillStyle = '#f1f5f2'; ctx.fillText(name, cx, cy + 0.5);
+      // parchment sign with a dark wood frame
+      const rx = Math.round(r[0]), ry = Math.round(r[1]), rw = Math.round(tw), rh = Math.round(th);
+      ctx.fillStyle = '#3e2210'; ctx.fillRect(rx - 2, ry - 2, rw + 4, rh + 4);
+      ctx.fillStyle = '#f4d495'; ctx.fillRect(rx, ry, rw, rh);
+      ctx.fillStyle = '#e8bf78'; ctx.fillRect(rx, ry + rh - 2, rw, 2);
+      ctx.fillStyle = '#3a2310'; ctx.fillText(name, cx, cy + 0.5);
     }
   }
 }
